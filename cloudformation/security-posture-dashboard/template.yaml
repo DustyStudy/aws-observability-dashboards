@@ -28,6 +28,52 @@ Parameters:
 
 Resources:
   # ---------------------------------------------------------------------
+  # KMS key used to encrypt both CloudWatch Logs groups at rest
+  # ---------------------------------------------------------------------
+  LogsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts CloudWatch Logs for the ${NamePrefix} observability dashboard"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            }
+          ]
+        }
+
+  LogsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}-observability-logs"
+      TargetKeyId: !Ref LogsKmsKey
+
+  # ---------------------------------------------------------------------
   # Log groups that receive raw finding events via EventBridge
   # ---------------------------------------------------------------------
   SecurityHubLogGroup:
@@ -35,12 +81,14 @@ Resources:
     Properties:
       LogGroupName: !Sub "/observability/${NamePrefix}/security-hub-findings"
       RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt LogsKmsKey.Arn
 
   GuardDutyLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/observability/${NamePrefix}/guardduty-findings"
       RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt LogsKmsKey.Arn
 
   # Resource policy allowing EventBridge to write into both log groups
   EventBridgeToLogsPolicy:

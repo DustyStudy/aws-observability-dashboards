@@ -10,6 +10,51 @@ terraform {
 }
 
 data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+
+# ---------------------------------------------------------------------------
+# KMS key used to encrypt both CloudWatch Logs groups at rest
+# ---------------------------------------------------------------------------
+resource "aws_kms_key" "logs" {
+  description         = "Encrypts CloudWatch Logs for the ${var.name_prefix} observability dashboard"
+  enable_key_rotation = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowAccountKeyAdministration"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowCloudWatchLogsToUseKey"
+        Effect    = "Allow"
+        Principal = { Service = "logs.${data.aws_region.current.name}.amazonaws.com" }
+        Action = [
+          "kms:Encrypt*",
+          "kms:Decrypt*",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:Describe*",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnLike = {
+            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:*"
+          }
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_kms_alias" "logs" {
+  name          = "alias/${var.name_prefix}-observability-logs"
+  target_key_id = aws_kms_key.logs.key_id
+}
 
 # ---------------------------------------------------------------------------
 # Log groups that receive raw finding events via EventBridge
@@ -17,11 +62,13 @@ data "aws_region" "current" {}
 resource "aws_cloudwatch_log_group" "security_hub" {
   name              = "/observability/${var.name_prefix}/security-hub-findings"
   retention_in_days = var.log_retention_in_days
+  kms_key_id        = aws_kms_key.logs.arn
 }
 
 resource "aws_cloudwatch_log_group" "guardduty" {
   name              = "/observability/${var.name_prefix}/guardduty-findings"
   retention_in_days = var.log_retention_in_days
+  kms_key_id        = aws_kms_key.logs.arn
 }
 
 # Resource policy allowing EventBridge to write into both log groups
@@ -37,10 +84,10 @@ resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
         Principal = { Service = "events.amazonaws.com" }
         Action    = ["logs:PutLogEvents", "logs:CreateLogStream"]
         Resource = [
-          "${aws_cloudwatch_log_group.security_hub.arn}",
-          "${aws_cloudwatch_log_group.guardduty.arn}",
+          aws_cloudwatch_log_group.security_hub.arn,
+          aws_cloudwatch_log_group.guardduty.arn,
         ]
-      }
+      },
     ]
   })
 }
@@ -49,8 +96,9 @@ resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
 # EventBridge rules routing findings into the log groups above
 # ---------------------------------------------------------------------------
 resource "aws_cloudwatch_event_rule" "security_hub_findings" {
-  name          = "${var.name_prefix}-security-hub-findings"
-  description   = "Routes Security Hub imported findings to CloudWatch Logs."
+  name        = "${var.name_prefix}-security-hub-findings"
+  description = "Routes Security Hub imported findings to CloudWatch Logs."
+
   event_pattern = jsonencode({
     source        = ["aws.securityhub"]
     "detail-type" = ["Security Hub Findings - Imported"]
@@ -63,8 +111,9 @@ resource "aws_cloudwatch_event_target" "security_hub_to_logs" {
 }
 
 resource "aws_cloudwatch_event_rule" "guardduty_findings" {
-  name          = "${var.name_prefix}-guardduty-findings"
-  description   = "Routes GuardDuty findings to CloudWatch Logs."
+  name        = "${var.name_prefix}-guardduty-findings"
+  description = "Routes GuardDuty findings to CloudWatch Logs."
+
   event_pattern = jsonencode({
     source        = ["aws.guardduty"]
     "detail-type" = ["GuardDuty Finding"]
@@ -134,40 +183,56 @@ resource "aws_cloudwatch_dashboard" "security_posture" {
   dashboard_body = jsonencode({
     widgets = [
       {
-        type = "metric", x = 0, y = 0, width = 6, height = 4
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title  = "Security Hub – Critical (24h)"
           view   = "singleValue"
           region = data.aws_region.current.name
           metrics = [
-            [var.metric_namespace, "SecurityHubCriticalFindings", { stat = "Sum", period = 86400 }]
+            [var.metric_namespace, "SecurityHubCriticalFindings", { stat = "Sum", period = 86400 }],
           ]
         }
       },
       {
-        type = "metric", x = 6, y = 0, width = 6, height = 4
+        type   = "metric"
+        x      = 6
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title  = "Security Hub – High (24h)"
           view   = "singleValue"
           region = data.aws_region.current.name
           metrics = [
-            [var.metric_namespace, "SecurityHubHighFindings", { stat = "Sum", period = 86400 }]
+            [var.metric_namespace, "SecurityHubHighFindings", { stat = "Sum", period = 86400 }],
           ]
         }
       },
       {
-        type = "metric", x = 12, y = 0, width = 6, height = 4
+        type   = "metric"
+        x      = 12
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title  = "GuardDuty – High Severity (24h)"
           view   = "singleValue"
           region = data.aws_region.current.name
           metrics = [
-            [var.metric_namespace, "GuardDutyHighSeverityFindings", { stat = "Sum", period = 86400 }]
+            [var.metric_namespace, "GuardDutyHighSeverityFindings", { stat = "Sum", period = 86400 }],
           ]
         }
       },
       {
-        type = "log", x = 18, y = 0, width = 6, height = 4
+        type   = "log"
+        x      = 18
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title  = "Security Hub Findings – Volume (24h)"
           region = data.aws_region.current.name
@@ -176,7 +241,11 @@ resource "aws_cloudwatch_dashboard" "security_posture" {
         }
       },
       {
-        type = "log", x = 0, y = 4, width = 12, height = 6
+        type   = "log"
+        x      = 0
+        y      = 4
+        width  = 12
+        height = 6
         properties = {
           title  = "Security Hub Findings by Severity"
           region = data.aws_region.current.name
@@ -185,7 +254,11 @@ resource "aws_cloudwatch_dashboard" "security_posture" {
         }
       },
       {
-        type = "log", x = 12, y = 4, width = 12, height = 6
+        type   = "log"
+        x      = 12
+        y      = 4
+        width  = 12
+        height = 6
         properties = {
           title  = "Top Failing Security Hub Controls"
           region = data.aws_region.current.name
@@ -194,7 +267,11 @@ resource "aws_cloudwatch_dashboard" "security_posture" {
         }
       },
       {
-        type = "log", x = 0, y = 10, width = 12, height = 6
+        type   = "log"
+        x      = 0
+        y      = 10
+        width  = 12
+        height = 6
         properties = {
           title  = "GuardDuty Findings by Type"
           region = data.aws_region.current.name
@@ -203,14 +280,18 @@ resource "aws_cloudwatch_dashboard" "security_posture" {
         }
       },
       {
-        type = "log", x = 12, y = 10, width = 12, height = 6
+        type   = "log"
+        x      = 12
+        y      = 10
+        width  = 12
+        height = 6
         properties = {
           title  = "GuardDuty Findings Trend (hourly)"
           region = data.aws_region.current.name
           view   = "line"
           query  = "SOURCE '${aws_cloudwatch_log_group.guardduty.name}' | stats count(*) as findings by bin(1h)"
         }
-      }
+      },
     ]
   })
 }

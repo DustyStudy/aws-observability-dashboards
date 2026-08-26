@@ -10,8 +10,9 @@ CloudFormation template in `cloudformation/security-posture-dashboard`.
 - Security Hub enabled in this account/region (for the Security Hub widgets)
 - GuardDuty enabled in this account/region (for the GuardDuty widgets)
 - Terraform >= 1.5.0, AWS provider >= 5.0
-- Permissions to create: CloudWatch Logs groups + resource policies, EventBridge
-  rules, CloudWatch Logs metric filters, CloudWatch dashboards
+- Permissions to create: KMS key + alias, CloudWatch Logs groups + resource
+  policies, EventBridge rules, CloudWatch Logs metric filters, CloudWatch
+  dashboards
 
 No QuickSight license required.
 
@@ -45,6 +46,14 @@ terraform apply
 - `dashboard_url` — direct console link to the deployed dashboard
 - `security_hub_log_group_name` / `guardduty_log_group_name` — for building
   your own additional Logs Insights queries on top of the same data
+
+## Encryption
+
+Both log groups are encrypted at rest with a dedicated customer-managed KMS
+key (key rotation enabled). The key policy grants the account root full
+administration and scopes the CloudWatch Logs service principal's
+encrypt/decrypt permissions to this account's log groups via an
+`aws:logs:arn` condition.
 
 ## Known limitation
 
