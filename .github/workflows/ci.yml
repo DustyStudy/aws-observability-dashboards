@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cloudformation:
+    name: CloudFormation lint + security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: Run cfn-lint
+        run: |
+          find cloudformation -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
+
+      - name: Run Checkov (CloudFormation)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: cloudformation
+          framework: cloudformation
+          soft_fail: false
+
+  terraform:
+    name: Terraform fmt/validate + lint + security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive terraform
+
+      - name: Terraform init & validate (per module)
+        run: |
+          for dir in terraform/*/; do
+            echo "Validating $dir"
+            (cd "$dir" && terraform init -backend=false && terraform validate)
+          done
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Run TFLint (per module)
+        run: |
+          for dir in terraform/*/; do
+            echo "Linting $dir"
+            (cd "$dir" && tflint)
+          done
+
+      - name: Run Checkov (Terraform)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform
+          framework: terraform
+          soft_fail: false
