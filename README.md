@@ -34,8 +34,8 @@ Each dashboard folder is self-contained and deployable on its own.
 |---|---|---|
 | [security-posture-dashboard](cloudformation/security-posture-dashboard) | ✅ Built | Security Hub findings + GuardDuty findings — severity breakdown, top failing controls, findings by type, trend over time |
 | [bedrock-usage-cost-dashboard](cloudformation/bedrock-usage-cost-dashboard) | ✅ Built | Bedrock invocations, tokens, latency, errors/throttles by model (native metrics), plus estimated daily cost by usage type via a scheduled Cost Explorer collector |
+| [agentic-ai-guardrails-dashboard](cloudformation/agentic-ai-guardrails-dashboard) | ✅ Built | Bedrock Agents activity (invocations, latency, token usage, model-call health) + Bedrock Guardrails behavior (intervention rate, interventions by policy category, latency/errors) |
 | ai-service-inventory-dashboard | Planned | Which accounts/regions have Bedrock, Rekognition, Comprehend, Textract enabled |
-| agentic-ai-guardrails-dashboard | Planned | Bedrock Agents activity + Bedrock Guardrails blocked/flagged content |
 | network-exposure-dashboard | Planned | Public-facing resources, open security groups, VPC Flow Log anomalies |
 
 ## How each dashboard is wired
