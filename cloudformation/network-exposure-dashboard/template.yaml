@@ -132,6 +132,15 @@ Resources:
   # ---------------------------------------------------------------------
   ExposureCollectorRole:
     Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_356
+            comment: >-
+              Every "*" resource in this role's policy is on a
+              Describe/List/PutMetricData-style action that AWS documents as
+              not supporting resource-level permissions; see the inline
+              comment on each statement.
     Properties:
       RoleName: !Sub "${NamePrefix}-collector-role"
       AssumeRolePolicyDocument:
@@ -143,6 +152,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
       Policies:
         - PolicyName: exposure-scan-and-metric-publish
           PolicyDocument:
@@ -216,6 +226,8 @@ Resources:
       KmsKeyArn: !GetAtt ExposureKmsKey.Arn
       DeadLetterConfig:
         TargetArn: !GetAtt ExposureCollectorDlq.Arn
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           METRIC_NAMESPACE: !Ref MetricNamespace

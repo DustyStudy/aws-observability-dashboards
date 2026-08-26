@@ -140,6 +140,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
       Policies:
         - PolicyName: cost-explorer-read-and-metric-publish
           PolicyDocument:
@@ -192,6 +193,8 @@ Resources:
       KmsKeyArn: !GetAtt ObservabilityKmsKey.Arn
       DeadLetterConfig:
         TargetArn: !GetAtt CostCollectorDlq.Arn
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           METRIC_NAMESPACE: !Ref MetricNamespace

@@ -107,6 +107,12 @@ for the NHI-collector Lambda.
 The NHI-collector's log group, environment variables, and DLQ are all
 encrypted with a dedicated customer-managed KMS key (rotation enabled).
 
+## Observability
+
+The NHI-collector Lambda has active AWS X-Ray tracing enabled, so a slow or
+failing run (e.g. credential report generation taking longer than usual)
+shows up as a trace in the X-Ray console, not just a CloudWatch Logs line.
+
 ## Extending
 
 To track additional non-human identity surfaces, the same pattern applies:

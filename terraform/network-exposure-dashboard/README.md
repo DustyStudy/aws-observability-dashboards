@@ -110,6 +110,12 @@ second look," not a confirmed open bucket; verify in the console or via
 The exposure-collector's log group, environment variables, and DLQ are all
 encrypted with a dedicated customer-managed KMS key (rotation enabled).
 
+## Observability
+
+The exposure-collector Lambda has active AWS X-Ray tracing enabled, so a
+slow or failing multi-region scan shows up as a trace in the X-Ray console,
+not just a CloudWatch Logs line.
+
 ## Extending
 
 To flag additional resource types (CloudFront distributions, API Gateway

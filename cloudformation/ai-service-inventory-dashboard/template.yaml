@@ -135,6 +135,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
       Policies:
         - PolicyName: inventory-scan-and-metric-publish
           PolicyDocument:
@@ -194,6 +195,8 @@ Resources:
       KmsKeyArn: !GetAtt InventoryKmsKey.Arn
       DeadLetterConfig:
         TargetArn: !GetAtt InventoryCollectorDlq.Arn
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           METRIC_NAMESPACE: !Ref MetricNamespace

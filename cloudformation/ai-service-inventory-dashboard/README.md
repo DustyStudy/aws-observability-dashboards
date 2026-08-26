@@ -85,6 +85,12 @@ for the inventory-collector Lambda.
 The inventory-collector's log group, environment variables, and DLQ are all
 encrypted with a dedicated customer-managed KMS key (rotation enabled).
 
+## Observability
+
+The inventory-collector Lambda has active AWS X-Ray tracing enabled, so a
+slow or failing multi-region scan shows up as a trace in the X-Ray console,
+not just a CloudWatch Logs line.
+
 ## Extending
 
 To scan additional AWS accounts, add cross-account `sts:AssumeRole` logic to

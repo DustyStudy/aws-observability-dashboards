@@ -116,6 +116,15 @@ resource "aws_iam_role_policy_attachment" "exposure_collector_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "exposure_collector_xray" {
+  role       = aws_iam_role.exposure_collector.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
+# Every "*" resource below is on an action AWS documents as not supporting
+# resource-level permissions (Describe*, List*, PutMetricData, etc.) — see
+# the inline comment on each statement.
+#checkov:skip=CKV_AWS_356:Every "*" here is on a Describe/List/PutMetricData-style action with no resource-level permission support; see per-statement comments.
 data "aws_iam_policy_document" "exposure_collector_permissions" {
   statement {
     sid       = "ListEnabledRegions"
@@ -194,6 +203,7 @@ data "archive_file" "exposure_collector" {
 # regional/global public endpoints, so a VPC would require NAT gateways in
 # every region with no security benefit for a read-only exposure scan.
 #checkov:skip=CKV_AWS_117:Multi-region public-endpoint scan; a NAT gateway in every region would add cost with no security benefit here.
+#checkov:skip=CKV_AWS_272:No AWS Signer code-signing pipeline exists for this account; out of scope for a public template repo since the profile ARN is account-specific.
 resource "aws_lambda_function" "exposure_collector" {
   function_name = "${var.name_prefix}-collector"
   description   = "Scans enabled regions for internet-exposed network/compute resources and publishes counts per region."
@@ -213,6 +223,10 @@ resource "aws_lambda_function" "exposure_collector" {
     target_arn = aws_sqs_queue.exposure_collector_dlq.arn
   }
 
+  tracing_config {
+    mode = "Active"
+  }
+
   environment {
     variables = {
       METRIC_NAMESPACE = var.metric_namespace
@@ -222,6 +236,7 @@ resource "aws_lambda_function" "exposure_collector" {
   depends_on = [
     aws_cloudwatch_log_group.exposure_collector,
     aws_iam_role_policy_attachment.exposure_collector_basic_execution,
+    aws_iam_role_policy_attachment.exposure_collector_xray,
     aws_iam_role_policy.exposure_collector_permissions,
   ]
 }

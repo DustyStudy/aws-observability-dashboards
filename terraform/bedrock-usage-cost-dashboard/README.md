@@ -68,6 +68,12 @@ terraform apply
 The cost-collector's log group, environment variables, and DLQ are all
 encrypted with a dedicated customer-managed KMS key (rotation enabled).
 
+## Observability
+
+The cost-collector Lambda has active AWS X-Ray tracing enabled, so a slow or
+failing invocation (e.g. Cost Explorer taking longer than usual) shows up as
+a trace in the X-Ray console, not just a CloudWatch Logs line.
+
 ## Extending
 
 To add another AI service's usage (SageMaker, Rekognition, Comprehend), most

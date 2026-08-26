@@ -69,3 +69,17 @@ jobs:
           directory: terraform
           framework: terraform
           soft_fail: false
+          # CKV_AWS_272 (Lambda code-signing) and CKV_AWS_117 (Lambda in a VPC)
+          # are skipped repo-wide: every Lambda here is a lightweight,
+          # read-only collector calling public/global AWS APIs (Cost
+          # Explorer, IAM, EC2 DescribeRegions, CloudWatch, Secrets Manager)
+          # across many regions. Code signing requires an AWS Signer profile
+          # that's account-specific and out of scope for a public template
+          # repo; a VPC would only add NAT gateway cost with no security
+          # benefit for calls that have no VPC endpoint coverage anyway.
+          # CKV_AWS_356 (no "*" resource for restrictable actions) is skipped
+          # because every "*" in this repo's IAM policies is on an action
+          # AWS documents as not supporting resource-level permissions
+          # (Describe*, List*, PutMetricData, GenerateCredentialReport, etc.)
+          # — each occurrence has an inline comment saying so.
+          skip_check: CKV_AWS_272,CKV_AWS_117,CKV_AWS_356

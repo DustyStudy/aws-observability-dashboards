@@ -140,6 +140,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
       Policies:
         - PolicyName: nhi-scan-and-metric-publish
           PolicyDocument:
@@ -209,6 +210,8 @@ Resources:
       KmsKeyArn: !GetAtt NhiKmsKey.Arn
       DeadLetterConfig:
         TargetArn: !GetAtt NhiCollectorDlq.Arn
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           METRIC_NAMESPACE: !Ref MetricNamespace

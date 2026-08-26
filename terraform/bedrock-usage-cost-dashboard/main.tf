@@ -116,6 +116,11 @@ resource "aws_iam_role_policy_attachment" "cost_collector_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "cost_collector_xray" {
+  role       = aws_iam_role.cost_collector.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
 data "aws_iam_policy_document" "cost_collector_permissions" {
   statement {
     sid       = "ReadCostExplorer"
@@ -166,6 +171,7 @@ data "archive_file" "cost_collector" {
 # function in a VPC would require a NAT gateway with no security benefit
 # for a read-only, scheduled cost lookup.
 #checkov:skip=CKV_AWS_117:Cost Explorer has no VPC endpoint support; a NAT gateway would add cost with no security benefit here.
+#checkov:skip=CKV_AWS_272:No AWS Signer code-signing pipeline exists for this account; out of scope for a public template repo since the profile ARN is account-specific.
 resource "aws_lambda_function" "cost_collector" {
   function_name = "${var.name_prefix}-cost-collector"
   description   = "Publishes yesterday's Bedrock cost-by-usage-type from Cost Explorer as a CloudWatch metric."
@@ -185,6 +191,10 @@ resource "aws_lambda_function" "cost_collector" {
     target_arn = aws_sqs_queue.cost_collector_dlq.arn
   }
 
+  tracing_config {
+    mode = "Active"
+  }
+
   environment {
     variables = {
       METRIC_NAMESPACE = var.metric_namespace
@@ -194,6 +204,7 @@ resource "aws_lambda_function" "cost_collector" {
   depends_on = [
     aws_cloudwatch_log_group.cost_collector,
     aws_iam_role_policy_attachment.cost_collector_basic_execution,
+    aws_iam_role_policy_attachment.cost_collector_xray,
     aws_iam_role_policy.cost_collector_permissions,
   ]
 }

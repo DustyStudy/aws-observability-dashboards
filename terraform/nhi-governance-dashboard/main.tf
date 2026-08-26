@@ -116,6 +116,11 @@ resource "aws_iam_role_policy_attachment" "nhi_collector_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "nhi_collector_xray" {
+  role       = aws_iam_role.nhi_collector.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
 data "aws_iam_policy_document" "nhi_collector_permissions" {
   statement {
     sid    = "ReadIamCredentialReportAndRoles"
@@ -189,6 +194,7 @@ data "archive_file" "nhi_collector" {
 # benefit for a read-only governance scan, so a VPC would mean NAT gateways
 # in every region for nothing.
 #checkov:skip=CKV_AWS_117:Global IAM + multi-region Secrets Manager scan; a NAT gateway in every region would add cost with no security benefit here.
+#checkov:skip=CKV_AWS_272:No AWS Signer code-signing pipeline exists for this account; out of scope for a public template repo since the profile ARN is account-specific.
 resource "aws_lambda_function" "nhi_collector" {
   function_name = "${var.name_prefix}-collector"
   description   = "Pulls IAM credential report and role data, checks Secrets Manager rotation, and publishes NHI governance metrics."
@@ -208,6 +214,10 @@ resource "aws_lambda_function" "nhi_collector" {
     target_arn = aws_sqs_queue.nhi_collector_dlq.arn
   }
 
+  tracing_config {
+    mode = "Active"
+  }
+
   environment {
     variables = {
       METRIC_NAMESPACE     = var.metric_namespace
@@ -218,6 +228,7 @@ resource "aws_lambda_function" "nhi_collector" {
   depends_on = [
     aws_cloudwatch_log_group.nhi_collector,
     aws_iam_role_policy_attachment.nhi_collector_basic_execution,
+    aws_iam_role_policy_attachment.nhi_collector_xray,
     aws_iam_role_policy.nhi_collector_permissions,
   ]
 }

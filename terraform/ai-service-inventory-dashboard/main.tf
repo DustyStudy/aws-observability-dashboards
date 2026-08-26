@@ -116,6 +116,11 @@ resource "aws_iam_role_policy_attachment" "inventory_collector_basic_execution" 
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "inventory_collector_xray" {
+  role       = aws_iam_role.inventory_collector.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
 data "aws_iam_policy_document" "inventory_collector_permissions" {
   statement {
     sid       = "ListEnabledRegions"
@@ -175,6 +180,7 @@ data "archive_file" "inventory_collector" {
 # would require NAT gateways in every region with no security benefit for a
 # read-only inventory scan.
 #checkov:skip=CKV_AWS_117:Multi-region public-endpoint scan; a VPC would require NAT gateways in every region with no security benefit here.
+#checkov:skip=CKV_AWS_272:No AWS Signer code-signing pipeline exists for this account; out of scope for a public template repo since the profile ARN is account-specific.
 resource "aws_lambda_function" "inventory_collector" {
   function_name = "${var.name_prefix}-collector"
   description   = "Scans enabled regions for AI service CloudWatch activity and publishes a presence metric per service/region."
@@ -194,6 +200,10 @@ resource "aws_lambda_function" "inventory_collector" {
     target_arn = aws_sqs_queue.inventory_collector_dlq.arn
   }
 
+  tracing_config {
+    mode = "Active"
+  }
+
   environment {
     variables = {
       METRIC_NAMESPACE = var.metric_namespace
@@ -203,6 +213,7 @@ resource "aws_lambda_function" "inventory_collector" {
   depends_on = [
     aws_cloudwatch_log_group.inventory_collector,
     aws_iam_role_policy_attachment.inventory_collector_basic_execution,
+    aws_iam_role_policy_attachment.inventory_collector_xray,
     aws_iam_role_policy.inventory_collector_permissions,
   ]
 }
