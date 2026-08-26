@@ -23,7 +23,7 @@ module "security_posture_dashboard" {
   source = "./terraform/security-posture-dashboard"
 
   name_prefix           = "security-posture"
-  log_retention_in_days = 90
+  log_retention_in_days = 365
 }
 ```
 
@@ -38,7 +38,7 @@ terraform apply
 | Name | Default | Description |
 |---|---|---|
 | `name_prefix` | `security-posture` | Prefix for all resource names |
-| `log_retention_in_days` | `90` | Retention for the two Logs groups |
+| `log_retention_in_days` | `365` | Retention for the two Logs groups (365+ required to satisfy Checkov CKV_AWS_338) |
 | `metric_namespace` | `SecurityObservability` | Namespace for the custom metrics this module creates |
 
 ## Outputs

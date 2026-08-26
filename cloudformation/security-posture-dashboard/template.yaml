@@ -16,8 +16,12 @@ Parameters:
 
   LogRetentionInDays:
     Type: Number
-    Default: 90
-    Description: Retention period for the CloudWatch Logs groups capturing findings.
+    Default: 365
+    Description: >-
+      Retention period for the CloudWatch Logs groups capturing findings.
+      Defaults to 365 to satisfy Checkov CKV_AWS_338 (retain at least 1 year);
+      lower it only if your compliance posture allows shorter retention —
+      Checkov will flag anything under 365.
     AllowedValues:
       [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
 

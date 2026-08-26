@@ -28,7 +28,7 @@ encrypt/decrypt permissions to this account's log groups via an
 aws cloudformation deploy \
   --template-file template.yaml \
   --stack-name security-posture-dashboard \
-  --parameter-overrides NamePrefix=security-posture LogRetentionInDays=90
+  --parameter-overrides NamePrefix=security-posture LogRetentionInDays=365
 ```
 
 ## Parameters
@@ -36,7 +36,7 @@ aws cloudformation deploy \
 | Parameter | Default | Description |
 |---|---|---|
 | `NamePrefix` | `security-posture` | Prefix for all resource names |
-| `LogRetentionInDays` | `90` | Retention for the two Logs groups |
+| `LogRetentionInDays` | `365` | Retention for the two Logs groups (365+ required to satisfy Checkov CKV_AWS_338) |
 | `MetricNamespace` | `SecurityObservability` | Namespace for the custom metrics this stack creates |
 
 ## Outputs

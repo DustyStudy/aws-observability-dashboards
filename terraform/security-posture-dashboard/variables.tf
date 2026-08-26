@@ -10,9 +10,9 @@ variable "name_prefix" {
 }
 
 variable "log_retention_in_days" {
-  description = "Retention period for the CloudWatch Logs groups capturing findings."
+  description = "Retention period for the CloudWatch Logs groups capturing findings. Defaults to 365 to satisfy Checkov CKV_AWS_338 (retain at least 1 year); lower it only if your compliance posture allows shorter retention — Checkov will flag anything under 365."
   type        = number
-  default     = 90
+  default     = 365
 
   validation {
     condition = contains(
