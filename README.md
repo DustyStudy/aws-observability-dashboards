@@ -37,12 +37,15 @@ Each dashboard folder is self-contained and deployable on its own.
 | [agentic-ai-guardrails-dashboard](cloudformation/agentic-ai-guardrails-dashboard) | ✅ Built | Bedrock Agents activity (invocations, latency, token usage, model-call health) + Bedrock Guardrails behavior (intervention rate, interventions by policy category, latency/errors) |
 | [ai-service-inventory-dashboard](cloudformation/ai-service-inventory-dashboard) | ✅ Built | Which regions actually have Bedrock, Bedrock Agents, Bedrock Guardrails, Rekognition, Comprehend, or Textract in active use — shadow AI adoption tracking via a scheduled multi-region CloudWatch scan |
 | [network-exposure-dashboard](cloudformation/network-exposure-dashboard) | ✅ Built | Internet-open security groups, public EC2/RDS/load balancers, exposed S3 buckets by region, plus optional VPC Flow Log rejected-connection trends and port-scan detection |
+| [nhi-governance-dashboard](cloudformation/nhi-governance-dashboard) | ✅ Built | Non-human identity risk: stale/unrotated access keys, users without MFA, inactive IAM users, stale IAM roles, external-trust roles, workload identity federation footprint, Secrets Manager rotation status |
 
-All five dashboards from the original roadmap are built. Ideas for further
-dashboards: CloudFront/API Gateway exposure, EFS/FSx public mounts, SageMaker
-endpoint cost and utilization, or cross-account rollups of any dashboard here
-via StackSets — see each dashboard's own README for its specific "Extending"
-notes.
+All five dashboards from the original roadmap are built, plus a sixth
+(nhi-governance) added for non-human identity — currently one of the most
+active areas of enterprise cloud security spend. Ideas for further
+dashboards: CloudFront/API Gateway exposure, EFS/FSx public mounts,
+SageMaker endpoint cost and utilization, or cross-account rollups of any
+dashboard here via StackSets — see each dashboard's own README for its
+specific "Extending" notes.
 
 ## How each dashboard is wired
 

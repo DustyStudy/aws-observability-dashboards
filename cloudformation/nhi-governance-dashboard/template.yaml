@@ -1,0 +1,590 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Non-human identity (NHI) governance dashboard. A daily Lambda pulls the IAM
+  credential report and role metadata to surface the machine-identity risks
+  security teams are being asked about right now: stale/unrotated access
+  keys, console users without MFA, inactive IAM users, IAM roles nobody has
+  used in 90+ days, roles trusting an external AWS account or wildcard
+  principal, workload identity federation footprint (OIDC/SAML providers),
+  and Secrets Manager secrets without rotation enabled. IAM and STS are
+  global services, so most metrics here are account-wide rather than
+  per-region; Secrets Manager is regional and is broken out by region. Works
+  in AWS commercial and AWS GovCloud.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: nhi-governance
+    Description: Prefix applied to all resource names created by this stack.
+    AllowedPattern: "^[a-z0-9-]{1,40}$"
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention period for the NHI-collector Lambda's log group. Defaults to
+      365 to satisfy Checkov CKV_AWS_338 (retain at least 1 year).
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  MetricNamespace:
+    Type: String
+    Default: NHIGovernance
+    Description: CloudWatch custom metric namespace the NHI-collector Lambda publishes into.
+
+  StaleThresholdDays:
+    Type: Number
+    Default: 90
+    Description: Age in days beyond which an access key, IAM role, or user is considered stale/inactive.
+
+  GovernanceScanSchedule:
+    Type: String
+    Default: rate(1 day)
+    Description: EventBridge schedule expression for the NHI-collector Lambda.
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key used to encrypt the NHI-collector's log group, env vars, and DLQ
+  # ---------------------------------------------------------------------
+  NhiKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts NHI-collector resources for the ${NamePrefix} dashboard"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowLambdaAndSqsServices",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com", "sqs.amazonaws.com"]
+              },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+
+  NhiKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}-observability"
+      TargetKeyId: !Ref NhiKmsKey
+
+  # ---------------------------------------------------------------------
+  # Dead-letter queue for the NHI-collector Lambda
+  # ---------------------------------------------------------------------
+  NhiCollectorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${NamePrefix}-collector-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref NhiKmsKey
+
+  # ---------------------------------------------------------------------
+  # Log group for the NHI-collector Lambda
+  # ---------------------------------------------------------------------
+  NhiCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NamePrefix}-collector"
+      RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt NhiKmsKey.Arn
+
+  # ---------------------------------------------------------------------
+  # IAM role for the NHI-collector Lambda
+  # ---------------------------------------------------------------------
+  NhiCollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-collector-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: nhi-scan-and-metric-publish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadIamCredentialReportAndRoles
+                Effect: Allow
+                Action:
+                  - iam:GenerateCredentialReport
+                  - iam:GetCredentialReport
+                  - iam:ListRoles
+                  - iam:ListOpenIDConnectProviders
+                  - iam:ListSAMLProviders
+                Resource: "*" # These IAM read/report actions do not support resource-level permissions
+              - Sid: ListEnabledRegions
+                Effect: Allow
+                Action:
+                  - ec2:DescribeRegions
+                Resource: "*" # DescribeRegions does not support resource-level permissions
+              - Sid: ReadSecretsRotationStatus
+                Effect: Allow
+                Action:
+                  - secretsmanager:ListSecrets
+                Resource: "*" # Read-only checks across a dynamic, account-wide secret list
+              - Sid: PublishGovernanceMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*" # PutMetricData does not support resource-level permissions
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref MetricNamespace
+              - Sid: SendToDlq
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt NhiCollectorDlq.Arn
+
+  # ---------------------------------------------------------------------
+  # NHI-collector Lambda: pulls the IAM credential report plus role/provider
+  # metadata, checks Secrets Manager rotation status per region, and
+  # publishes counts as CloudWatch metrics. Flagged identifiers (usernames,
+  # role names, secret names) are printed to the Lambda's own CloudWatch
+  # Logs for triage, since metrics only carry numbers, not names.
+  # ---------------------------------------------------------------------
+  NhiCollectorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NhiCollectorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              This function calls global IAM APIs and Secrets Manager
+              ListSecrets across every enabled region — all public endpoints
+              with no VPC endpoint benefit for a read-only governance scan,
+              so a VPC would mean NAT gateways in every region for nothing.
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-collector"
+      Description: Pulls IAM credential report and role data, checks Secrets Manager rotation, and publishes NHI governance metrics.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt NhiCollectorRole.Arn
+      Timeout: 180
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      KmsKeyArn: !GetAtt NhiKmsKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt NhiCollectorDlq.Arn
+      Environment:
+        Variables:
+          METRIC_NAMESPACE: !Ref MetricNamespace
+          STALE_THRESHOLD_DAYS: !Ref StaleThresholdDays
+      Code:
+        ZipFile: |
+          import csv
+          import io
+          import json
+          import os
+          import time
+          import urllib.parse
+          from datetime import datetime, timezone
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "NHIGovernance")
+          STALE_DAYS = int(os.environ.get("STALE_THRESHOLD_DAYS", "90"))
+
+
+          def _parse_date(value):
+              if not value or value in ("N/A", "no_information", "not_supported"):
+                  return None
+              try:
+                  return datetime.fromisoformat(value)
+              except ValueError:
+                  return None
+
+
+          def _days_since(dt):
+              if dt is None:
+                  return None
+              return (datetime.now(timezone.utc) - dt).days
+
+
+          def _get_credential_report(iam):
+              # Report generation is asynchronous; poll until it's ready.
+              for _ in range(10):
+                  try:
+                      resp = iam.generate_credential_report()
+                      if resp.get("State") == "COMPLETE":
+                          break
+                  except ClientError:
+                      pass
+                  time.sleep(2)
+              report = iam.get_credential_report()
+              csv_text = report["Content"].decode("utf-8")
+              return list(csv.DictReader(io.StringIO(csv_text)))
+
+
+          def _scan_credential_report(rows, findings):
+              stale_keys = 0
+              total_active_keys = 0
+              users_without_mfa = 0
+              inactive_users = 0
+
+              for row in rows:
+                  user = row.get("user")
+                  if user == "<root_account>":
+                      continue
+
+                  if row.get("password_enabled") == "true" and row.get("mfa_active") == "false":
+                      users_without_mfa += 1
+                      findings.append(f"NO_MFA user={user}")
+
+                  key_used_recently = False
+                  for slot in ("1", "2"):
+                      if row.get(f"access_key_{slot}_active") != "true":
+                          continue
+                      total_active_keys += 1
+
+                      rotated_age = _days_since(_parse_date(row.get(f"access_key_{slot}_last_rotated")))
+                      if rotated_age is not None and rotated_age > STALE_DAYS:
+                          stale_keys += 1
+                          findings.append(f"STALE_ACCESS_KEY user={user} key_slot={slot} age_days={rotated_age}")
+
+                      used_age = _days_since(_parse_date(row.get(f"access_key_{slot}_last_used_date")))
+                      if used_age is not None and used_age <= STALE_DAYS:
+                          key_used_recently = True
+
+                  password_age = _days_since(_parse_date(row.get("password_last_used")))
+                  password_recent = password_age is not None and password_age <= STALE_DAYS
+
+                  user_age = _days_since(_parse_date(row.get("user_creation_time")))
+                  if user_age is not None and user_age > STALE_DAYS and not key_used_recently and not password_recent:
+                      inactive_users += 1
+                      findings.append(f"INACTIVE_USER user={user} account_age_days={user_age}")
+
+              return {
+                  "StaleAccessKeys": stale_keys,
+                  "TotalActiveAccessKeys": total_active_keys,
+                  "UsersWithoutMfa": users_without_mfa,
+                  "InactiveIamUsers": inactive_users,
+              }
+
+
+          def _has_external_trust(trust_doc_raw, account_id):
+              try:
+                  trust_doc = json.loads(urllib.parse.unquote(trust_doc_raw)) if isinstance(trust_doc_raw, str) else trust_doc_raw
+              except (ValueError, TypeError):
+                  return False
+
+              for stmt in trust_doc.get("Statement", []):
+                  principal = stmt.get("Principal", {})
+                  aws_principals = principal.get("AWS") if isinstance(principal, dict) else None
+                  if aws_principals is None:
+                      continue
+                  if isinstance(aws_principals, str):
+                      aws_principals = [aws_principals]
+                  for p in aws_principals:
+                      if p == "*":
+                          return True
+                      if p.startswith("arn:") and f":{account_id}:" not in p and account_id not in p:
+                          return True
+              return False
+
+
+          def _scan_roles(iam, account_id, findings):
+              total_roles = 0
+              stale_roles = 0
+              external_trust_roles = 0
+
+              for page in iam.get_paginator("list_roles").paginate():
+                  for role in page["Roles"]:
+                      if role["Path"].startswith("/aws-service-role/"):
+                          continue  # AWS-managed service-linked roles aren't useful NHI targets
+                      total_roles += 1
+
+                      last_used = role.get("RoleLastUsed", {}).get("LastUsedDate")
+                      if last_used is None:
+                          stale_roles += 1
+                          findings.append(f"STALE_ROLE role={role['RoleName']} reason=never_used")
+                      else:
+                          age = (datetime.now(timezone.utc) - last_used).days
+                          if age > STALE_DAYS:
+                              stale_roles += 1
+                              findings.append(f"STALE_ROLE role={role['RoleName']} age_days={age}")
+
+                      if _has_external_trust(role.get("AssumeRolePolicyDocument"), account_id):
+                          external_trust_roles += 1
+                          findings.append(f"EXTERNAL_TRUST_ROLE role={role['RoleName']}")
+
+              return {
+                  "TotalIamRoles": total_roles,
+                  "StaleIamRoles": stale_roles,
+                  "ExternalTrustRoles": external_trust_roles,
+              }
+
+
+          def _scan_identity_providers(iam):
+              oidc = len(iam.list_open_id_connect_providers().get("OpenIDConnectProviderList", []))
+              saml = len(iam.list_saml_providers().get("SAMLProviderList", []))
+              return {"OidcProviders": oidc, "SamlProviders": saml}
+
+
+          def _scan_secrets_rotation(regions, findings):
+              per_region = {}
+              for region in regions:
+                  try:
+                      sm = boto3.client("secretsmanager", region_name=region)
+                      count = 0
+                      for page in sm.get_paginator("list_secrets").paginate():
+                          for secret in page["SecretList"]:
+                              if not secret.get("RotationEnabled", False):
+                                  count += 1
+                                  findings.append(f"SECRET_NO_ROTATION region={region} name={secret['Name']}")
+                      per_region[region] = count
+                  except ClientError as exc:
+                      print(f"Secrets Manager scan skipped for {region}: {exc}")
+              return per_region
+
+
+          def chunked(items, size):
+              for i in range(0, len(items), size):
+                  yield items[i:i + size]
+
+
+          def handler(event, context):
+              sts = boto3.client("sts")
+              account_id = sts.get_caller_identity()["Account"]
+
+              iam = boto3.client("iam")
+              findings = []
+
+              rows = _get_credential_report(iam)
+              credential_metrics = _scan_credential_report(rows, findings)
+              role_metrics = _scan_roles(iam, account_id, findings)
+              provider_metrics = _scan_identity_providers(iam)
+
+              ec2 = boto3.client("ec2")
+              regions = [r["RegionName"] for r in ec2.describe_regions(AllRegions=False)["Regions"]]
+              secrets_by_region = _scan_secrets_rotation(regions, findings)
+
+              metric_data = []
+              for metric_name, value in {**credential_metrics, **role_metrics, **provider_metrics}.items():
+                  metric_data.append({
+                      "MetricName": metric_name,
+                      "Value": value,
+                      "Unit": "Count",
+                  })
+
+              for region, count in secrets_by_region.items():
+                  metric_data.append({
+                      "MetricName": "SecretsWithoutRotation",
+                      "Dimensions": [{"Name": "Region", "Value": region}],
+                      "Value": count,
+                      "Unit": "Count",
+                  })
+
+              cw = boto3.client("cloudwatch")
+              for batch in chunked(metric_data, 20):
+                  cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=batch)
+
+              for line in findings:
+                  print(line)
+
+              return {
+                  "metrics_published": len(metric_data),
+                  "findings": len(findings),
+                  "regions_scanned_for_secrets": len(regions),
+              }
+
+  # ---------------------------------------------------------------------
+  # Schedule the NHI collector
+  # ---------------------------------------------------------------------
+  NhiCollectorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-collector-schedule"
+      Description: Triggers the NHI-governance-collector Lambda on a schedule.
+      ScheduleExpression: !Ref GovernanceScanSchedule
+      State: ENABLED
+      Targets:
+        - Id: NhiCollectorTarget
+          Arn: !GetAtt NhiCollectorFunction.Arn
+
+  NhiCollectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NhiCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NhiCollectorSchedule.Arn
+
+  # ---------------------------------------------------------------------
+  # Dashboard
+  # ---------------------------------------------------------------------
+  NhiGovernanceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${NamePrefix}-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 4, "height": 4,
+              "properties": {
+                "title": "Stale Access Keys (>${StaleThresholdDays}d)",
+                "region": "${AWS::Region}",
+                "view": "singleValue",
+                "metrics": [ [ "${MetricNamespace}", "StaleAccessKeys", { "stat": "Maximum", "period": 86400 } ] ]
+              }
+            },
+            {
+              "type": "metric", "x": 4, "y": 0, "width": 4, "height": 4,
+              "properties": {
+                "title": "Users Without MFA",
+                "region": "${AWS::Region}",
+                "view": "singleValue",
+                "metrics": [ [ "${MetricNamespace}", "UsersWithoutMfa", { "stat": "Maximum", "period": 86400 } ] ]
+              }
+            },
+            {
+              "type": "metric", "x": 8, "y": 0, "width": 4, "height": 4,
+              "properties": {
+                "title": "Inactive IAM Users (>${StaleThresholdDays}d)",
+                "region": "${AWS::Region}",
+                "view": "singleValue",
+                "metrics": [ [ "${MetricNamespace}", "InactiveIamUsers", { "stat": "Maximum", "period": 86400 } ] ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 0, "width": 4, "height": 4,
+              "properties": {
+                "title": "Stale IAM Roles (>${StaleThresholdDays}d)",
+                "region": "${AWS::Region}",
+                "view": "singleValue",
+                "metrics": [ [ "${MetricNamespace}", "StaleIamRoles", { "stat": "Maximum", "period": 86400 } ] ]
+              }
+            },
+            {
+              "type": "metric", "x": 16, "y": 0, "width": 4, "height": 4,
+              "properties": {
+                "title": "External-Trust IAM Roles",
+                "region": "${AWS::Region}",
+                "view": "singleValue",
+                "metrics": [ [ "${MetricNamespace}", "ExternalTrustRoles", { "stat": "Maximum", "period": 86400 } ] ]
+              }
+            },
+            {
+              "type": "metric", "x": 20, "y": 0, "width": 4, "height": 4,
+              "properties": {
+                "title": "Workload Identity Providers (OIDC+SAML)",
+                "region": "${AWS::Region}",
+                "view": "singleValue",
+                "metrics": [
+                  [ { "expression": "oidc+saml", "label": "Identity Providers", "id": "total" } ],
+                  [ "${MetricNamespace}", "OidcProviders", { "stat": "Maximum", "period": 86400, "id": "oidc", "visible": false } ],
+                  [ "${MetricNamespace}", "SamlProviders", { "stat": "Maximum", "period": 86400, "id": "saml", "visible": false } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 4, "width": 12, "height": 6,
+              "properties": {
+                "title": "Access Keys: Total vs Stale (trend)",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "metrics": [
+                  [ "${MetricNamespace}", "TotalActiveAccessKeys", { "stat": "Maximum", "period": 86400, "label": "Total Active Keys" } ],
+                  [ "${MetricNamespace}", "StaleAccessKeys", { "stat": "Maximum", "period": 86400, "label": "Stale Keys" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 4, "width": 12, "height": 6,
+              "properties": {
+                "title": "IAM Roles: Total vs Stale (trend)",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "metrics": [
+                  [ "${MetricNamespace}", "TotalIamRoles", { "stat": "Maximum", "period": 86400, "label": "Total Roles" } ],
+                  [ "${MetricNamespace}", "StaleIamRoles", { "stat": "Maximum", "period": 86400, "label": "Stale Roles" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 10, "width": 12, "height": 6,
+              "properties": {
+                "title": "Secrets Manager – Secrets Without Rotation by Region",
+                "region": "${AWS::Region}",
+                "view": "bar",
+                "metrics": [
+                  [ { "expression": "SEARCH('{${MetricNamespace},Region} MetricName=\"SecretsWithoutRotation\"', 'Maximum', 86400)", "label": "No Rotation", "id": "e1" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 10, "width": 12, "height": 6,
+              "properties": {
+                "title": "Workload Identity Providers – OIDC vs SAML",
+                "region": "${AWS::Region}",
+                "view": "bar",
+                "metrics": [
+                  [ "${MetricNamespace}", "OidcProviders", { "stat": "Maximum", "period": 86400, "label": "OIDC" } ],
+                  [ "${MetricNamespace}", "SamlProviders", { "stat": "Maximum", "period": 86400, "label": "SAML" } ]
+                ]
+              }
+            }
+          ]
+        }
+
+Outputs:
+  DashboardName:
+    Description: Name of the created CloudWatch dashboard
+    Value: !Ref NhiGovernanceDashboard
+
+  DashboardUrl:
+    Description: Console URL to open the dashboard directly
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${NamePrefix}-dashboard"
+
+  NhiCollectorFunctionName:
+    Description: Name of the scheduled NHI-collector Lambda
+    Value: !Ref NhiCollectorFunction
+
+  NhiCollectorLogGroupName:
+    Description: Log group for the NHI-collector Lambda (also where flagged identities are printed)
+    Value: !Ref NhiCollectorLogGroup
