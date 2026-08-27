@@ -401,7 +401,7 @@ Resources:
                   },
               }
 
-  PatchCheckSchedule:
+  PatchCheckScheduleRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub ${DashboardName}-patch-check-schedule
@@ -417,7 +417,7 @@ Resources:
       FunctionName: !Ref PatchCheckFunction
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt PatchCheckSchedule.Arn
+      SourceArn: !GetAtt PatchCheckScheduleRule.Arn
 
   ##########################################################################
   # Dashboard

@@ -91,7 +91,7 @@ resource "aws_cloudwatch_log_resource_policy" "guardduty_eks" {
       Effect    = "Allow"
       Principal = { Service = "events.amazonaws.com" }
       Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
-      Resource  = "${aws_cloudwatch_log_group.guardduty_eks.arn}"
+      Resource  = aws_cloudwatch_log_group.guardduty_eks.arn
     }]
   })
 }
@@ -133,7 +133,7 @@ resource "aws_cloudwatch_log_resource_policy" "inspector_eks" {
       Effect    = "Allow"
       Principal = { Service = "events.amazonaws.com" }
       Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
-      Resource  = "${aws_cloudwatch_log_group.inspector_eks.arn}"
+      Resource  = aws_cloudwatch_log_group.inspector_eks.arn
     }]
   })
 }
