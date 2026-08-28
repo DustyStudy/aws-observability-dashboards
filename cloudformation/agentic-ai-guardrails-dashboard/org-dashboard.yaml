@@ -93,7 +93,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - cloudwatch:PutDashboard
-                  - cloudwatch:DeleteDashboard
+                  - cloudwatch:DeleteDashboards
                   - cloudwatch:GetDashboard
                 Resource: !Sub "arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/${DashboardName}"
 
@@ -304,7 +304,7 @@ Resources:
                   elif request_type == "Delete":
                       physical_id = event.get("PhysicalResourceId", dashboard_name)
                       try:
-                          cloudwatch.delete_dashboard(DashboardNames=[physical_id])
+                          cloudwatch.delete_dashboards(DashboardNames=[physical_id])
                       except ClientError as exc:
                           if exc.response["Error"]["Code"] not in ("ResourceNotFound", "ResourceNotFoundException"):
                               raise

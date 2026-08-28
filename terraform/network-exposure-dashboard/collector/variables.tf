@@ -34,9 +34,3 @@ variable "exposure_scan_schedule" {
   type        = string
   default     = "rate(1 day)"
 }
-
-variable "flow_logs_log_group_name" {
-  description = "Name of an EXISTING CloudWatch Logs group that your VPC Flow Logs already deliver to (this module does not create or enable flow logs). Leave blank to deploy without the flow-log widgets — they'll render with no data rather than fail."
-  type        = string
-  default     = ""
-}

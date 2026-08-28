@@ -1,12 +1,19 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Network exposure dashboard. A daily Lambda scans every enabled region for
-  security groups open to the internet on sensitive ports, EC2 instances with
-  public IPs, publicly accessible RDS instances, internet-facing load
-  balancers, and (account-wide) S3 buckets exposed via policy or ACL — then
-  publishes counts per region as CloudWatch custom metrics. Optionally pairs
-  with an existing VPC Flow Logs CloudWatch Logs group (not created by this
-  stack) for rejected-connection and port-scan-style Logs Insights widgets.
+  Network exposure collector — the per-account half of
+  network-exposure-dashboard, meant to be deployed via a CloudFormation
+  StackSet to every account in your organization (see
+  ../../org-observability/README.md). A daily Lambda scans every enabled
+  region for security groups open to the internet on sensitive ports, EC2
+  instances with public IPs, publicly accessible RDS instances,
+  internet-facing load balancers, and (account-wide) S3 buckets exposed via
+  policy or ACL — then publishes counts per region as CloudWatch custom
+  metrics. This stack has no dashboard and no VPC Flow Logs handling (that
+  lives in the org-dashboard/single-account template instead, since flow
+  logs are regional and reference a log group by name, not something to
+  replicate identically across every account). If you only care about a
+  single account, use template.yaml instead — it's identical to this file
+  plus a local single-account dashboard and the optional flow-log widgets.
   Works in AWS commercial and AWS GovCloud.
 
 Parameters:
@@ -34,15 +41,6 @@ Parameters:
     Type: String
     Default: rate(1 day)
     Description: EventBridge schedule expression for the exposure-collector Lambda.
-
-  FlowLogsLogGroupName:
-    Type: String
-    Default: ""
-    Description: >-
-      Name of an EXISTING CloudWatch Logs group that your VPC Flow Logs
-      already deliver to (this stack does not create or enable flow logs).
-      Leave blank to deploy without the flow-log widgets — they'll render
-      with no data rather than fail.
 
 Resources:
   # ---------------------------------------------------------------------
