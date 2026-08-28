@@ -97,42 +97,76 @@ resource "aws_cloudwatch_dashboard" "nhi_governance_org" {
   dashboard_body = jsonencode({
     widgets = [
       {
-        type       = "metric", x = 0, y = 0, width = 4, height = 4
+        type       = "metric"
+        x          = 0
+        y          = 0
+        width      = 4
+        height     = 4
         properties = {
-          title  = local.metric_specs.stale_keys.label, view = "singleValue"
-          region = data.aws_region.current.name, metrics = local.metric_groups.stale_keys
+          title   = local.metric_specs.stale_keys.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.stale_keys
         }
       },
       {
-        type       = "metric", x = 4, y = 0, width = 4, height = 4
+        type       = "metric"
+        x          = 4
+        y          = 0
+        width      = 4
+        height     = 4
         properties = {
-          title  = local.metric_specs.no_mfa.label, view = "singleValue"
-          region = data.aws_region.current.name, metrics = local.metric_groups.no_mfa
+          title   = local.metric_specs.no_mfa.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.no_mfa
         }
       },
       {
-        type       = "metric", x = 8, y = 0, width = 4, height = 4
+        type       = "metric"
+        x          = 8
+        y          = 0
+        width      = 4
+        height     = 4
         properties = {
-          title  = local.metric_specs.inactive_users.label, view = "singleValue"
-          region = data.aws_region.current.name, metrics = local.metric_groups.inactive_users
+          title   = local.metric_specs.inactive_users.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.inactive_users
         }
       },
       {
-        type       = "metric", x = 12, y = 0, width = 4, height = 4
+        type       = "metric"
+        x          = 12
+        y          = 0
+        width      = 4
+        height     = 4
         properties = {
-          title  = local.metric_specs.stale_roles.label, view = "singleValue"
-          region = data.aws_region.current.name, metrics = local.metric_groups.stale_roles
+          title   = local.metric_specs.stale_roles.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.stale_roles
         }
       },
       {
-        type       = "metric", x = 16, y = 0, width = 4, height = 4
+        type       = "metric"
+        x          = 16
+        y          = 0
+        width      = 4
+        height     = 4
         properties = {
-          title  = local.metric_specs.external_trust.label, view = "singleValue"
-          region = data.aws_region.current.name, metrics = local.metric_groups.external_trust
+          title   = local.metric_specs.external_trust.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.external_trust
         }
       },
       {
-        type       = "metric", x = 20, y = 0, width = 4, height = 4
+        type       = "metric"
+        x          = 20
+        y          = 0
+        width      = 4
+        height     = 4
         properties = {
           title   = "Workload Identity Providers (OIDC+SAML, org-wide)"
           view    = "singleValue"
@@ -141,7 +175,11 @@ resource "aws_cloudwatch_dashboard" "nhi_governance_org" {
         }
       },
       {
-        type       = "metric", x = 0, y = 4, width = 12, height = 6
+        type       = "metric"
+        x          = 0
+        y          = 4
+        width      = 12
+        height     = 6
         properties = {
           title   = "Access Keys: Total vs Stale (org-wide trend)"
           view    = "timeSeries"
@@ -150,7 +188,11 @@ resource "aws_cloudwatch_dashboard" "nhi_governance_org" {
         }
       },
       {
-        type       = "metric", x = 12, y = 4, width = 12, height = 6
+        type       = "metric"
+        x          = 12
+        y          = 4
+        width      = 12
+        height     = 6
         properties = {
           title   = "IAM Roles: Total vs Stale (org-wide trend)"
           view    = "timeSeries"
@@ -159,7 +201,11 @@ resource "aws_cloudwatch_dashboard" "nhi_governance_org" {
         }
       },
       {
-        type       = "metric", x = 0, y = 10, width = 12, height = 6
+        type       = "metric"
+        x          = 0
+        y          = 10
+        width      = 12
+        height     = 6
         properties = {
           title   = "Secrets Manager – Secrets Without Rotation by Account/Region"
           view    = "bar"
@@ -168,7 +214,11 @@ resource "aws_cloudwatch_dashboard" "nhi_governance_org" {
         }
       },
       {
-        type       = "metric", x = 12, y = 10, width = 12, height = 6
+        type       = "metric"
+        x          = 12
+        y          = 10
+        width      = 12
+        height     = 6
         properties = {
           title   = "Workload Identity Providers – OIDC vs SAML (org-wide)"
           view    = "bar"

@@ -76,6 +76,18 @@ Resources:
                   "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
                 }
               }
+            },
+            {
+              "Sid": "AllowLambdaAndSqsServices",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com", "sqs.amazonaws.com"]
+              },
+              "Action": [
+                "kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*",
+                "kms:GenerateDataKey*", "kms:Describe*"
+              ],
+              "Resource": "*"
             }
           ]
         }
@@ -86,6 +98,13 @@ Resources:
       LogGroupName: !Sub "/aws/lambda/${DashboardName}-generator"
       RetentionInDays: !Ref LogRetentionDays
       KmsKeyId: !GetAtt DashboardGeneratorKmsKey.Arn
+
+  DashboardGeneratorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${DashboardName}-generator-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref DashboardGeneratorKmsKey
 
   # ---------------------------------------------------------------------
   # IAM role for the generator Lambda — only touches the one dashboard it owns
@@ -114,6 +133,10 @@ Resources:
                   - cloudwatch:DeleteDashboards
                   - cloudwatch:GetDashboard
                 Resource: !Sub "arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/${DashboardName}"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt DashboardGeneratorDlq.Arn
 
   # ---------------------------------------------------------------------
   # Generator Lambda — renders and applies the DashboardBody at deploy time
@@ -142,7 +165,10 @@ Resources:
       Timeout: 30
       MemorySize: 128
       Role: !GetAtt DashboardGeneratorRole.Arn
+      ReservedConcurrentExecutions: 1
       KmsKeyArn: !GetAtt DashboardGeneratorKmsKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt DashboardGeneratorDlq.Arn
       TracingConfig:
         Mode: Active
       Code:

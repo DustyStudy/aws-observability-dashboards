@@ -123,70 +123,160 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
   dashboard_body = jsonencode({
     widgets = [
       {
-        type       = "metric", x = 0, y = 0, width = 6, height = 4
-        properties = { title = "Agent Invocations (org-wide, 24h)", region = data.aws_region.current.name, view = "singleValue", metrics = local.search_groups.agent_invocations_24h }
-      },
-      {
-        type       = "metric", x = 6, y = 0, width = 6, height = 4
-        properties = { title = "Guardrail Invocations (org-wide, 24h)", region = data.aws_region.current.name, view = "singleValue", metrics = local.search_groups.guardrail_inv_24h }
-      },
-      {
-        type       = "metric", x = 12, y = 0, width = 6, height = 4
-        properties = { title = "Guardrail Interventions (org-wide, 24h)", region = data.aws_region.current.name, view = "singleValue", metrics = local.search_groups.guardrail_intv_24h }
-      },
-      {
-        type       = "metric", x = 18, y = 0, width = 6, height = 4
-        properties = { title = "Guardrail Intervention Rate (org-wide, 24h)", region = data.aws_region.current.name, view = "singleValue", metrics = local.intervention_rate_metrics }
-      },
-      {
-        type       = "metric", x = 0, y = 4, width = 12, height = 6
+        type       = "metric"
+        x          = 0
+        y          = 0
+        width      = 6
+        height     = 4
         properties = {
-          title   = "Agent Invocations, Throttles & Errors (org-wide)", region = data.aws_region.current.name, view = "timeSeries"
+          title   = "Agent Invocations (org-wide, 24h)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = local.search_groups.agent_invocations_24h
+        }
+      },
+      {
+        type       = "metric"
+        x          = 6
+        y          = 0
+        width      = 6
+        height     = 4
+        properties = {
+          title   = "Guardrail Invocations (org-wide, 24h)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = local.search_groups.guardrail_inv_24h
+        }
+      },
+      {
+        type       = "metric"
+        x          = 12
+        y          = 0
+        width      = 6
+        height     = 4
+        properties = {
+          title   = "Guardrail Interventions (org-wide, 24h)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = local.search_groups.guardrail_intv_24h
+        }
+      },
+      {
+        type       = "metric"
+        x          = 18
+        y          = 0
+        width      = 6
+        height     = 4
+        properties = {
+          title   = "Guardrail Intervention Rate (org-wide, 24h)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = local.intervention_rate_metrics
+        }
+      },
+      {
+        type       = "metric"
+        x          = 0
+        y          = 4
+        width      = 12
+        height     = 6
+        properties = {
+          title   = "Agent Invocations, Throttles & Errors (org-wide)"
+          region  = data.aws_region.current.name
+          view    = "timeSeries"
           metrics = concat(local.search_groups.agent_invocation_count, local.search_groups.agent_throttles, local.search_groups.agent_client_errors, local.search_groups.agent_server_errors)
         }
       },
       {
-        type       = "metric", x = 12, y = 4, width = 12, height = 6
+        type       = "metric"
+        x          = 12
+        y          = 4
+        width      = 12
+        height     = 6
         properties = {
-          title   = "Agent Latency (org-wide, avg ms)", region = data.aws_region.current.name, view = "timeSeries"
+          title   = "Agent Latency (org-wide, avg ms)"
+          region  = data.aws_region.current.name
+          view    = "timeSeries"
           metrics = concat(local.search_groups.agent_total_time, local.search_groups.agent_model_latency, local.search_groups.agent_ttft)
         }
       },
       {
-        type       = "metric", x = 0, y = 10, width = 12, height = 6
+        type       = "metric"
+        x          = 0
+        y          = 10
+        width      = 12
+        height     = 6
         properties = {
-          title   = "Agent Token Usage (org-wide)", region = data.aws_region.current.name, view = "timeSeries"
+          title   = "Agent Token Usage (org-wide)"
+          region  = data.aws_region.current.name
+          view    = "timeSeries"
           metrics = concat(local.search_groups.agent_input_tokens, local.search_groups.agent_output_tokens)
         }
       },
       {
-        type       = "metric", x = 12, y = 10, width = 12, height = 6
+        type       = "metric"
+        x          = 12
+        y          = 10
+        width      = 12
+        height     = 6
         properties = {
-          title   = "Agent → Model Call Health (org-wide)", region = data.aws_region.current.name, view = "timeSeries"
+          title   = "Agent → Model Call Health (org-wide)"
+          region  = data.aws_region.current.name
+          view    = "timeSeries"
           metrics = concat(local.search_groups.model_invocation_count, local.search_groups.model_throttles, local.search_groups.model_client_errors, local.search_groups.model_server_errors)
         }
       },
       {
-        type       = "metric", x = 0, y = 16, width = 12, height = 6
+        type       = "metric"
+        x          = 0
+        y          = 16
+        width      = 12
+        height     = 6
         properties = {
-          title   = "Guardrail Invocations vs Interventions (org-wide)", region = data.aws_region.current.name, view = "timeSeries"
+          title   = "Guardrail Invocations vs Interventions (org-wide)"
+          region  = data.aws_region.current.name
+          view    = "timeSeries"
           metrics = concat(local.search_groups.guardrail_inv_trend, local.search_groups.guardrail_intv_trend)
         }
       },
       {
-        type       = "metric", x = 12, y = 16, width = 12, height = 6
-        properties = { title = "Guardrail Interventions by Policy Category (org-wide)", region = data.aws_region.current.name, view = "bar", metrics = local.policy_category_metrics }
+        type       = "metric"
+        x          = 12
+        y          = 16
+        width      = 12
+        height     = 6
+        properties = {
+          title   = "Guardrail Interventions by Policy Category (org-wide)"
+          region  = data.aws_region.current.name
+          view    = "bar"
+          metrics = local.policy_category_metrics
+        }
       },
       {
-        type       = "metric", x = 0, y = 22, width = 12, height = 6
+        type       = "metric"
+        x          = 0
+        y          = 22
+        width      = 12
+        height     = 6
         properties = {
-          title   = "Guardrail Latency & Errors (org-wide)", region = data.aws_region.current.name, view = "timeSeries"
+          title   = "Guardrail Latency & Errors (org-wide)"
+          region  = data.aws_region.current.name
+          view    = "timeSeries"
           metrics = concat(local.search_groups.guardrail_latency, local.search_groups.guardrail_client_errors, local.search_groups.guardrail_server_errors, local.search_groups.guardrail_throttles)
         }
       },
       {
-        type       = "metric", x = 12, y = 22, width = 12, height = 6
-        properties = { title = "Guardrail Text Units Consumed (org-wide)", region = data.aws_region.current.name, view = "timeSeries", metrics = local.search_groups.guardrail_text_units }
+        type       = "metric"
+        x          = 12
+        y          = 22
+        width      = 12
+        height     = 6
+        properties = {
+          title   = "Guardrail Text Units Consumed (org-wide)"
+          region  = data.aws_region.current.name
+          view    = "timeSeries"
+          metrics = local.search_groups.guardrail_text_units
+        }
       },
     ]
   })
