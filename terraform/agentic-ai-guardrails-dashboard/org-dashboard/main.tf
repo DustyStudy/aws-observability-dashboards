@@ -53,24 +53,29 @@ locals {
 
   # For each spec: N hidden per-account SEARCH expressions + 1 visible
   # combining expression (SUM or AVG per the spec).
+  # Split into two flat maps (accounts, totals) rather than one deeply
+  # nested concat/for expression — simpler to read and to keep formatted.
+  search_group_accounts = {
+    for key, spec in local.search_specs : key => [
+      for i, acct in var.member_account_ids : [{
+        expression = "SEARCH('{${spec.namespace},${spec.dimension}} MetricName=\"${spec.metric_name}\"', '${spec.stat}', ${spec.period})"
+        id         = "${spec.id_prefix}${i}"
+        accountId  = acct
+        visible    = false
+      }]
+    ]
+  }
+
+  search_group_totals = {
+    for key, spec in local.search_specs : key => [[{
+      expression = "${spec.combine}([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
+      label      = spec.label
+      id         = "total_${spec.id_prefix}"
+    }]]
+  }
+
   search_groups = {
-    for key, spec in local.search_specs : key => concat(
-      [
-        for i, acct in var.member_account_ids : [{
-          expression = "SEARCH('{${spec.namespace},${spec.dimension}} MetricName=\"${spec.metric_name}\"', '${spec.stat}', ${spec.period})"
-          id         = "${spec.id_prefix}${i}"
-          accountId  = acct
-          visible    = false
-        }]
-      ],
-      [
-        [{
-          expression = "${spec.combine}([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
-          label      = spec.label
-          id         = "total_${spec.id_prefix}"
-        }]
-      ]
-    )
+    for key, spec in local.search_specs : key => concat(local.search_group_accounts[key], local.search_group_totals[key])
   }
 
   # Intervention rate: two dedicated hidden per-account SEARCH groups

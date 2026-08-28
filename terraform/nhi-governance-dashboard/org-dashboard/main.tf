@@ -37,22 +37,27 @@ locals {
 
   # Every value here is a ready-to-use `metrics` array: N hidden
   # per-account entries + 1 visible SUM() expression summing all of them.
-  metric_groups = {
-    for key, spec in local.metric_specs : key => concat(
-      [
-        for i, acct in var.member_account_ids : [
-          var.metric_namespace, spec.metric_name,
-          { stat = spec.stat, period = 86400, accountId = acct, id = "${spec.id_prefix}${i}", visible = false }
-        ]
-      ],
-      [
-        [{
-          expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
-          label      = spec.label
-          id         = "total_${spec.id_prefix}"
-        }]
+  # Split into two flat maps (accounts, totals) rather than one deeply
+  # nested concat/for expression — simpler to read and to keep formatted.
+  metric_group_accounts = {
+    for key, spec in local.metric_specs : key => [
+      for i, acct in var.member_account_ids : [
+        var.metric_namespace, spec.metric_name,
+        { stat = spec.stat, period = 86400, accountId = acct, id = "${spec.id_prefix}${i}", visible = false }
       ]
-    )
+    ]
+  }
+
+  metric_group_totals = {
+    for key, spec in local.metric_specs : key => [[{
+      expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
+      label      = spec.label
+      id         = "total_${spec.id_prefix}"
+    }]]
+  }
+
+  metric_groups = {
+    for key, spec in local.metric_specs : key => concat(local.metric_group_accounts[key], local.metric_group_totals[key])
   }
 
   # The "Workload Identity Providers" single-value widget shows one number
