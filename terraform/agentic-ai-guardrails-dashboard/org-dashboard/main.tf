@@ -128,11 +128,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
   dashboard_body = jsonencode({
     widgets = [
       {
-        type       = "metric"
-        x          = 0
-        y          = 0
-        width      = 6
-        height     = 4
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title   = "Agent Invocations (org-wide, 24h)"
           region  = data.aws_region.current.name
@@ -141,11 +141,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 6
-        y          = 0
-        width      = 6
-        height     = 4
+        type   = "metric"
+        x      = 6
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title   = "Guardrail Invocations (org-wide, 24h)"
           region  = data.aws_region.current.name
@@ -154,11 +154,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 12
-        y          = 0
-        width      = 6
-        height     = 4
+        type   = "metric"
+        x      = 12
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title   = "Guardrail Interventions (org-wide, 24h)"
           region  = data.aws_region.current.name
@@ -167,11 +167,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 18
-        y          = 0
-        width      = 6
-        height     = 4
+        type   = "metric"
+        x      = 18
+        y      = 0
+        width  = 6
+        height = 4
         properties = {
           title   = "Guardrail Intervention Rate (org-wide, 24h)"
           region  = data.aws_region.current.name
@@ -180,11 +180,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 0
-        y          = 4
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 0
+        y      = 4
+        width  = 12
+        height = 6
         properties = {
           title   = "Agent Invocations, Throttles & Errors (org-wide)"
           region  = data.aws_region.current.name
@@ -193,11 +193,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 12
-        y          = 4
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 12
+        y      = 4
+        width  = 12
+        height = 6
         properties = {
           title   = "Agent Latency (org-wide, avg ms)"
           region  = data.aws_region.current.name
@@ -206,11 +206,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 0
-        y          = 10
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 0
+        y      = 10
+        width  = 12
+        height = 6
         properties = {
           title   = "Agent Token Usage (org-wide)"
           region  = data.aws_region.current.name
@@ -219,11 +219,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 12
-        y          = 10
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 12
+        y      = 10
+        width  = 12
+        height = 6
         properties = {
           title   = "Agent → Model Call Health (org-wide)"
           region  = data.aws_region.current.name
@@ -232,11 +232,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 0
-        y          = 16
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 0
+        y      = 16
+        width  = 12
+        height = 6
         properties = {
           title   = "Guardrail Invocations vs Interventions (org-wide)"
           region  = data.aws_region.current.name
@@ -245,11 +245,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 12
-        y          = 16
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 12
+        y      = 16
+        width  = 12
+        height = 6
         properties = {
           title   = "Guardrail Interventions by Policy Category (org-wide)"
           region  = data.aws_region.current.name
@@ -258,11 +258,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 0
-        y          = 22
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 0
+        y      = 22
+        width  = 12
+        height = 6
         properties = {
           title   = "Guardrail Latency & Errors (org-wide)"
           region  = data.aws_region.current.name
@@ -271,11 +271,11 @@ resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
         }
       },
       {
-        type       = "metric"
-        x          = 12
-        y          = 22
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 12
+        y      = 22
+        width  = 12
+        height = 6
         properties = {
           title   = "Guardrail Text Units Consumed (org-wide)"
           region  = data.aws_region.current.name
