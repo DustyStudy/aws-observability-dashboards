@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CloudWatch Observability Access Manager (OAM) Sink. Deploy this ONCE, by
+  hand, into whichever account you've designated as the central monitoring
+  account for org-wide dashboards. Every other account in the organization
+  links to this sink (see ../oam-link), after which dashboards deployed in
+  this account can pull metrics, logs, and traces from every linked account.
+  An account can have only one sink — if this account already has one, use
+  its existing sink ARN instead of deploying this template.
+
+Parameters:
+  SinkName:
+    Type: String
+    Default: org-observability-sink
+    Description: Name of the OAM sink.
+
+  OrganizationId:
+    Type: String
+    Description: >-
+      Your AWS Organization ID (e.g. o-abc123xyz9). Every account in this
+      organization will be permitted to link to this sink. Find it with:
+      aws organizations describe-organization --query Organization.Id
+    AllowedPattern: "^o-[a-z0-9]{10,32}$"
+
+Resources:
+  ObservabilitySink:
+    Type: AWS::Oam::Sink
+    Properties:
+      Name: !Ref SinkName
+      Policy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowOrgAccountsToLink
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - oam:CreateLink
+              - oam:UpdateLink
+            Resource: "*"
+            Condition:
+              "ForAllValues:StringEquals":
+                "aws:PrincipalOrgID":
+                  - !Ref OrganizationId
+                "oam:ResourceTypes":
+                  - "AWS::CloudWatch::Metric"
+                  - "AWS::Logs::LogGroup"
+                  - "AWS::XRay::Trace"
+
+Outputs:
+  SinkArn:
+    Description: >-
+      ARN of the sink. Every account's OAM Link (see ../oam-link) needs this
+      value as its MonitoringSinkArn parameter.
+    Value: !GetAtt ObservabilitySink.Arn
+
+  SinkName:
+    Value: !Ref SinkName

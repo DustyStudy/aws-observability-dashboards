@@ -1,0 +1,444 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Network exposure dashboard. A daily Lambda scans every enabled region for
+  security groups open to the internet on sensitive ports, EC2 instances with
+  public IPs, publicly accessible RDS instances, internet-facing load
+  balancers, and (account-wide) S3 buckets exposed via policy or ACL — then
+  publishes counts per region as CloudWatch custom metrics. Optionally pairs
+  with an existing VPC Flow Logs CloudWatch Logs group (not created by this
+  stack) for rejected-connection and port-scan-style Logs Insights widgets.
+  Works in AWS commercial and AWS GovCloud.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: network-exposure
+    Description: Prefix applied to all resource names created by this stack.
+    AllowedPattern: "^[a-z0-9-]{1,40}$"
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention period for the exposure-collector Lambda's log group.
+      Defaults to 365 to satisfy Checkov CKV_AWS_338 (retain at least 1 year).
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  MetricNamespace:
+    Type: String
+    Default: NetworkExposure
+    Description: CloudWatch custom metric namespace the exposure-collector Lambda publishes into.
+
+  ExposureScanSchedule:
+    Type: String
+    Default: rate(1 day)
+    Description: EventBridge schedule expression for the exposure-collector Lambda.
+
+  FlowLogsLogGroupName:
+    Type: String
+    Default: ""
+    Description: >-
+      Name of an EXISTING CloudWatch Logs group that your VPC Flow Logs
+      already deliver to (this stack does not create or enable flow logs).
+      Leave blank to deploy without the flow-log widgets — they'll render
+      with no data rather than fail.
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key used to encrypt the exposure-collector's log group, env vars,
+  # and DLQ
+  # ---------------------------------------------------------------------
+  ExposureKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts exposure-collector resources for the ${NamePrefix} dashboard"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowLambdaAndSqsServices",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com", "sqs.amazonaws.com"]
+              },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+
+  ExposureKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}-observability"
+      TargetKeyId: !Ref ExposureKmsKey
+
+  # ---------------------------------------------------------------------
+  # Dead-letter queue for the exposure-collector Lambda
+  # ---------------------------------------------------------------------
+  ExposureCollectorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${NamePrefix}-collector-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref ExposureKmsKey
+
+  # ---------------------------------------------------------------------
+  # Log group for the exposure-collector Lambda
+  # ---------------------------------------------------------------------
+  ExposureCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NamePrefix}-collector"
+      RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt ExposureKmsKey.Arn
+
+  # ---------------------------------------------------------------------
+  # IAM role for the exposure-collector Lambda
+  # ---------------------------------------------------------------------
+  ExposureCollectorRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_356
+            comment: >-
+              Every "*" resource in this role's policy is on a
+              Describe/List/PutMetricData-style action that AWS documents as
+              not supporting resource-level permissions; see the inline
+              comment on each statement.
+    Properties:
+      RoleName: !Sub "${NamePrefix}-collector-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
+      Policies:
+        - PolicyName: exposure-scan-and-metric-publish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListEnabledRegions
+                Effect: Allow
+                Action:
+                  - ec2:DescribeRegions
+                Resource: "*" # DescribeRegions does not support resource-level permissions
+              - Sid: DescribeNetworkAndComputeResources
+                Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeInstances
+                  - rds:DescribeDBInstances
+                  - elasticloadbalancing:DescribeLoadBalancers
+                Resource: "*" # These Describe/List actions do not support resource-level permissions
+              - Sid: ReadS3ExposurePosture
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicyStatus
+                  - s3:GetBucketAcl
+                Resource: "*" # Read-only checks across a dynamic, account-wide bucket list
+              - Sid: PublishExposureMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*" # PutMetricData does not support resource-level permissions
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref MetricNamespace
+              - Sid: SendToDlq
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ExposureCollectorDlq.Arn
+
+  # ---------------------------------------------------------------------
+  # Exposure-collector Lambda: scans every enabled region for internet-open
+  # security group rules, publicly reachable EC2/RDS/load balancers, and
+  # (account-wide) publicly exposed S3 buckets; republishes counts as
+  # CloudWatch metrics. Full resource identifiers for anything flagged are
+  # printed to the Lambda's own CloudWatch Logs for triage, since metrics
+  # only carry numbers, not names.
+  # ---------------------------------------------------------------------
+  ExposureCollectorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ExposureCollectorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              This function calls EC2/RDS/ELB Describe APIs and CloudWatch
+              PutMetricData across every enabled region plus global S3
+              APIs — all regional/global public endpoints, so a VPC would
+              require NAT gateways in every region with no security benefit
+              for a read-only exposure scan.
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-collector"
+      Description: Scans enabled regions for internet-exposed network/compute resources and publishes counts per region.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ExposureCollectorRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      KmsKeyArn: !GetAtt ExposureKmsKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt ExposureCollectorDlq.Arn
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          METRIC_NAMESPACE: !Ref MetricNamespace
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          from botocore.exceptions import ClientError
+
+          METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "NetworkExposure")
+
+          # Ports we treat as sensitive enough to call out separately from
+          # "any open-to-the-internet rule". Extend this set to fit your
+          # environment.
+          SENSITIVE_PORTS = {22, 3389, 3306, 5432, 1433, 27017, 6379, 9200, 5900}
+
+
+          def _is_open_rule(perm):
+              for ip_range in perm.get("IpRanges", []):
+                  if ip_range.get("CidrIp") == "0.0.0.0/0":
+                      return True
+              for ip_range in perm.get("Ipv6Ranges", []):
+                  if ip_range.get("CidrIpv6") == "::/0":
+                      return True
+              return False
+
+
+          def _rule_ports(perm):
+              from_port = perm.get("FromPort")
+              to_port = perm.get("ToPort")
+              if from_port is None or to_port is None:
+                  # No port range means the rule covers all ports (e.g. -1 = all traffic)
+                  return set(range(0, 65536))
+              return set(range(from_port, to_port + 1))
+
+
+          def scan_region(region, findings):
+              ec2 = boto3.client("ec2", region_name=region)
+              open_rules = 0
+              open_sensitive_rules = 0
+
+              for page in ec2.get_paginator("describe_security_groups").paginate():
+                  for sg in page["SecurityGroups"]:
+                      for perm in sg.get("IpPermissions", []):
+                          if _is_open_rule(perm):
+                              open_rules += 1
+                              if _rule_ports(perm) & SENSITIVE_PORTS:
+                                  open_sensitive_rules += 1
+                                  findings.append(
+                                      f"OPEN_SENSITIVE_SG region={region} group={sg['GroupId']} name={sg.get('GroupName')}"
+                                  )
+
+              public_instances = 0
+              for page in ec2.get_paginator("describe_instances").paginate(
+                  Filters=[{"Name": "instance-state-name", "Values": ["running", "stopped"]}]
+              ):
+                  for reservation in page["Reservations"]:
+                      for instance in reservation["Instances"]:
+                          if instance.get("PublicIpAddress"):
+                              public_instances += 1
+                              findings.append(f"PUBLIC_EC2 region={region} instance={instance['InstanceId']}")
+
+              public_rds = 0
+              try:
+                  rds = boto3.client("rds", region_name=region)
+                  for page in rds.get_paginator("describe_db_instances").paginate():
+                      for db in page["DBInstances"]:
+                          if db.get("PubliclyAccessible"):
+                              public_rds += 1
+                              findings.append(f"PUBLIC_RDS region={region} instance={db['DBInstanceIdentifier']}")
+              except ClientError as exc:
+                  print(f"RDS scan skipped for {region}: {exc}")
+
+              internet_facing_lbs = 0
+              try:
+                  elbv2 = boto3.client("elbv2", region_name=region)
+                  for page in elbv2.get_paginator("describe_load_balancers").paginate():
+                      for lb in page["LoadBalancers"]:
+                          if lb.get("Scheme") == "internet-facing":
+                              internet_facing_lbs += 1
+                              findings.append(f"PUBLIC_LB region={region} lb={lb['LoadBalancerName']}")
+              except ClientError as exc:
+                  print(f"ELBv2 scan skipped for {region}: {exc}")
+
+              return {
+                  "OpenSecurityGroupRules": open_rules,
+                  "OpenSensitivePortRules": open_sensitive_rules,
+                  "PublicEc2Instances": public_instances,
+                  "PubliclyAccessibleRdsInstances": public_rds,
+                  "InternetFacingLoadBalancers": internet_facing_lbs,
+              }
+
+
+          def scan_s3_buckets(findings):
+              """S3 is a global service; buckets are counted by their home region."""
+              s3 = boto3.client("s3")
+              region_counts = {}
+              try:
+                  buckets = s3.list_buckets().get("Buckets", [])
+              except ClientError as exc:
+                  print(f"S3 bucket listing failed: {exc}")
+                  return region_counts
+
+              for bucket in buckets:
+                  name = bucket["Name"]
+                  try:
+                      loc = s3.get_bucket_location(Bucket=name).get("LocationConstraint")
+                      bucket_region = loc or "us-east-1"
+                  except ClientError:
+                      bucket_region = "us-east-1"
+
+                  is_public = False
+                  try:
+                      status = s3.get_bucket_policy_status(Bucket=name)
+                      is_public = status["PolicyStatus"]["IsPublic"]
+                  except ClientError:
+                      pass
+
+                  if not is_public:
+                      try:
+                          acl = s3.get_bucket_acl(Bucket=name)
+                          for grant in acl.get("Grants", []):
+                              if grant.get("Grantee", {}).get("URI", "").endswith("/AllUsers"):
+                                  is_public = True
+                                  break
+                      except ClientError:
+                          pass
+
+                  if is_public:
+                      findings.append(f"PUBLIC_S3 bucket={name} region={bucket_region}")
+                      region_counts[bucket_region] = region_counts.get(bucket_region, 0) + 1
+
+              return region_counts
+
+
+          def chunked(items, size):
+              for i in range(0, len(items), size):
+                  yield items[i:i + size]
+
+
+          def handler(event, context):
+              ec2_home = boto3.client("ec2")
+              regions = [r["RegionName"] for r in ec2_home.describe_regions(AllRegions=False)["Regions"]]
+
+              findings = []
+              metric_data = []
+
+              for region in regions:
+                  try:
+                      counts = scan_region(region, findings)
+                  except ClientError as exc:
+                      print(f"Region scan failed for {region}: {exc}")
+                      continue
+                  for metric_name, value in counts.items():
+                      metric_data.append({
+                          "MetricName": metric_name,
+                          "Dimensions": [{"Name": "Region", "Value": region}],
+                          "Value": value,
+                          "Unit": "Count",
+                      })
+
+              for region, count in scan_s3_buckets(findings).items():
+                  metric_data.append({
+                      "MetricName": "PubliclyAccessibleS3Buckets",
+                      "Dimensions": [{"Name": "Region", "Value": region}],
+                      "Value": count,
+                      "Unit": "Count",
+                  })
+
+              cw = boto3.client("cloudwatch")
+              for batch in chunked(metric_data, 20):
+                  cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=batch)
+
+              for line in findings:
+                  print(line)
+
+              return {
+                  "regions_scanned": len(regions),
+                  "metrics_published": len(metric_data),
+                  "findings": len(findings),
+              }
+
+  # ---------------------------------------------------------------------
+  # Schedule the exposure collector
+  # ---------------------------------------------------------------------
+  ExposureCollectorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-collector-schedule"
+      Description: Triggers the network-exposure-collector Lambda on a schedule.
+      ScheduleExpression: !Ref ExposureScanSchedule
+      State: ENABLED
+      Targets:
+        - Id: ExposureCollectorTarget
+          Arn: !GetAtt ExposureCollectorFunction.Arn
+
+  ExposureCollectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ExposureCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ExposureCollectorSchedule.Arn
+
+  # ---------------------------------------------------------------------
+  # Dashboard
+Outputs:
+  ExposureCollectorFunctionName:
+    Description: Name of the scheduled exposure-collector Lambda
+    Value: !Ref ExposureCollectorFunction
+
+  ExposureCollectorLogGroupName:
+    Description: Log group for the exposure-collector Lambda (also where flagged resource identifiers are printed)
+    Value: !Ref ExposureCollectorLogGroup

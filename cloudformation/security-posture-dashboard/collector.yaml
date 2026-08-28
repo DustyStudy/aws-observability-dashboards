@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Security posture observability dashboard. Captures Security Hub findings and
+  GuardDuty findings via EventBridge into CloudWatch Logs, promotes key fields to
+  CloudWatch metrics, and renders a CloudWatch Dashboard with severity breakdowns,
+  top failing controls, and GuardDuty finding trends. Works in AWS commercial and
+  AWS GovCloud. Requires Security Hub and/or GuardDuty already enabled in this
+  account/region.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: security-posture
+    Description: Prefix applied to all resource names created by this stack.
+    AllowedPattern: "^[a-z0-9-]{1,40}$"
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention period for the CloudWatch Logs groups capturing findings.
+      Defaults to 365 to satisfy Checkov CKV_AWS_338 (retain at least 1 year);
+      lower it only if your compliance posture allows shorter retention —
+      Checkov will flag anything under 365.
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  MetricNamespace:
+    Type: String
+    Default: SecurityObservability
+    Description: CloudWatch custom metric namespace used for this dashboard's metric filters.
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key used to encrypt both CloudWatch Logs groups at rest
+  # ---------------------------------------------------------------------
+  LogsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts CloudWatch Logs for the ${NamePrefix} observability dashboard"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            }
+          ]
+        }
+
+  LogsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}-observability-logs"
+      TargetKeyId: !Ref LogsKmsKey
+
+  # ---------------------------------------------------------------------
+  # Log groups that receive raw finding events via EventBridge
+  # ---------------------------------------------------------------------
+  SecurityHubLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/observability/${NamePrefix}/security-hub-findings"
+      RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt LogsKmsKey.Arn
+
+  GuardDutyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/observability/${NamePrefix}/guardduty-findings"
+      RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt LogsKmsKey.Arn
+
+  # Resource policy allowing EventBridge to write into both log groups
+  EventBridgeToLogsPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub "${NamePrefix}-eventbridge-to-logs"
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowEventBridgeToWriteLogs",
+              "Effect": "Allow",
+              "Principal": { "Service": "events.amazonaws.com" },
+              "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
+              "Resource": [
+                "${SecurityHubLogGroup.Arn}",
+                "${GuardDutyLogGroup.Arn}"
+              ]
+            }
+          ]
+        }
+
+  # ---------------------------------------------------------------------
+  # EventBridge rules routing findings into the log groups above
+  # ---------------------------------------------------------------------
+  SecurityHubFindingsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-security-hub-findings"
+      Description: Routes Security Hub imported findings to CloudWatch Logs.
+      EventPattern:
+        source:
+          - aws.securityhub
+        detail-type:
+          - "Security Hub Findings - Imported"
+      State: ENABLED
+      Targets:
+        - Id: SecurityHubLogTarget
+          Arn: !GetAtt SecurityHubLogGroup.Arn
+
+  GuardDutyFindingsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-guardduty-findings"
+      Description: Routes GuardDuty findings to CloudWatch Logs.
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - "GuardDuty Finding"
+      State: ENABLED
+      Targets:
+        - Id: GuardDutyLogTarget
+          Arn: !GetAtt GuardDutyLogGroup.Arn
+
+  # ---------------------------------------------------------------------
+  # Metric filters — promote key fields to CloudWatch metrics for the
+  # single-value widgets on the dashboard.
+  #
+  # NOTE: these patterns assume a single finding per event (detail.findings[0]).
+  # Security Hub can batch multiple findings into one event; if you see gaps
+  # between log volume and metric counts, split multi-finding events with a
+  # subscription filter -> Lambda before counting, or accept this as an
+  # approximation for the top-line numbers.
+  # ---------------------------------------------------------------------
+  SecurityHubCriticalFindingsFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref SecurityHubLogGroup
+      FilterPattern: '{ $.detail.findings[0].Severity.Label = "CRITICAL" }'
+      MetricTransformations:
+        - MetricName: SecurityHubCriticalFindings
+          MetricNamespace: !Ref MetricNamespace
+          MetricValue: "1"
+          DefaultValue: 0
+
+  SecurityHubHighFindingsFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref SecurityHubLogGroup
+      FilterPattern: '{ $.detail.findings[0].Severity.Label = "HIGH" }'
+      MetricTransformations:
+        - MetricName: SecurityHubHighFindings
+          MetricNamespace: !Ref MetricNamespace
+          MetricValue: "1"
+          DefaultValue: 0
+
+  GuardDutyHighSeverityFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref GuardDutyLogGroup
+      FilterPattern: '{ $.detail.severity >= 7 }'
+      MetricTransformations:
+        - MetricName: GuardDutyHighSeverityFindings
+          MetricNamespace: !Ref MetricNamespace
+          MetricValue: "1"
+          DefaultValue: 0
+
+  # ---------------------------------------------------------------------
+  # Dashboard
+Outputs:
+  SecurityHubLogGroupName:
+    Description: Log group receiving Security Hub findings
+    Value: !Ref SecurityHubLogGroup
+
+  GuardDutyLogGroupName:
+    Description: Log group receiving GuardDuty findings
+    Value: !Ref GuardDutyLogGroup

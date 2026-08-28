@@ -1,0 +1,44 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CloudWatch Observability Access Manager (OAM) Link. Deploy this to EVERY
+  account you want visible in the central monitoring account's dashboards —
+  normally via a CloudFormation StackSet targeting your whole Organization or
+  specific OUs (see ../README.md). Each account that deploys this becomes a
+  "source account": it shares its metrics, logs, and X-Ray traces with the
+  monitoring account that owns the sink referenced below. This does not
+  create a dashboard or any collector resources — it only opens the sharing
+  relationship. Deploy the per-dashboard collector stacks separately (also
+  via StackSets) to actually generate data worth sharing.
+
+Parameters:
+  MonitoringSinkArn:
+    Type: String
+    Description: >-
+      ARN of the OAM sink in the monitoring account (the SinkArn output from
+      ../oam-sink). Every source account links to the same sink ARN.
+    AllowedPattern: "^arn:aws[a-zA-Z-]*:oam:[a-z0-9-]+:[0-9]{12}:sink/.+$"
+
+  LabelTemplate:
+    Type: String
+    Default: "$AccountName"
+    Description: >-
+      How this account is labeled in the monitoring account's console.
+      $AccountName, $AccountEmail, and $AccountEmailNoDomain are supported.
+
+Resources:
+  ObservabilityLink:
+    Type: AWS::Oam::Link
+    Properties:
+      LabelTemplate: !Ref LabelTemplate
+      ResourceTypes:
+        - "AWS::CloudWatch::Metric"
+        - "AWS::Logs::LogGroup"
+        - "AWS::XRay::Trace"
+      SinkIdentifier: !Ref MonitoringSinkArn
+
+Outputs:
+  LinkArn:
+    Value: !GetAtt ObservabilityLink.Arn
+
+  LinkId:
+    Value: !Ref ObservabilityLink

@@ -1,0 +1,434 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  eks-security-dashboard: CloudWatch dashboard covering EKS cluster/image
+  security posture - GuardDuty EKS Protection findings, Inspector container
+  image vulnerability findings, and a scheduled Lambda that tracks
+  Kubernetes version drift and node AMI patch staleness. GovCloud and
+  commercial compatible.
+
+Parameters:
+  DashboardName:
+    Type: String
+    Default: eks-security-dashboard
+    Description: Name of the CloudWatch dashboard to create; also used as the prefix for other resource names.
+    AllowedPattern: "^[a-z0-9-]{1,40}$"
+
+  LatestEksVersion:
+    Type: String
+    Default: "1.31"
+    Description: >
+      Kubernetes version considered "current" for drift comparisons.
+      Update this parameter as you adopt new EKS versions.
+
+  StaleAmiDays:
+    Type: Number
+    Default: 60
+    Description: Age in days after which a nodegroup AMI release is flagged stale.
+
+  PatchCheckSchedule:
+    Type: String
+    Default: rate(1 day)
+    Description: EventBridge schedule expression for the patch-drift check.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention period for the EventBridge-fed log groups and the
+      patch-check Lambda's own log group. Defaults to 365 to satisfy
+      Checkov CKV_AWS_338 (retain at least 1 year).
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key used to encrypt every log group, the Lambda's env vars, and the DLQ
+  # ---------------------------------------------------------------------
+  EksSecurityKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts log groups, Lambda env vars, and DLQ for the ${DashboardName} dashboard"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowLambdaAndSqsServices",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com", "sqs.amazonaws.com"]
+              },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+
+  EksSecurityKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${DashboardName}-observability"
+      TargetKeyId: !Ref EksSecurityKmsKey
+
+  ##########################################################################
+  # GuardDuty EKS Protection findings -> Logs
+  ##########################################################################
+  GuardDutyEksLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/events/${DashboardName}/guardduty-eks
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt EksSecurityKmsKey.Arn
+
+  GuardDutyEksLogGroupPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub ${DashboardName}-guardduty-eks-policy
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "AllowEventBridgeToCloudWatchLogs",
+            "Effect": "Allow",
+            "Principal": { "Service": "events.amazonaws.com" },
+            "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": "${GuardDutyEksLogGroup.Arn}"
+          }]
+        }
+
+  GuardDutyEksRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${DashboardName}-guardduty-eks
+      Description: Routes GuardDuty findings for EKS clusters/workloads to Logs.
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - GuardDuty Finding
+        detail:
+          resource:
+            resourceType:
+              - EKSCluster
+              - Container
+              - Kubernetes
+      State: ENABLED
+      Targets:
+        - Id: GuardDutyEksLogTarget
+          Arn: !GetAtt GuardDutyEksLogGroup.Arn
+
+  ##########################################################################
+  # Inspector v2 container image findings -> Logs
+  ##########################################################################
+  InspectorEksLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/events/${DashboardName}/inspector-images
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt EksSecurityKmsKey.Arn
+
+  InspectorEksLogGroupPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub ${DashboardName}-inspector-policy
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "AllowEventBridgeToCloudWatchLogs",
+            "Effect": "Allow",
+            "Principal": { "Service": "events.amazonaws.com" },
+            "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": "${InspectorEksLogGroup.Arn}"
+          }]
+        }
+
+  InspectorEksRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${DashboardName}-inspector-images
+      Description: >
+        Routes Inspector2 CRITICAL/HIGH findings for ECR container images
+        (the images running in EKS) to Logs.
+      EventPattern:
+        source:
+          - aws.inspector2
+        detail-type:
+          - Inspector2 Finding
+        detail:
+          severity:
+            - CRITICAL
+            - HIGH
+          type:
+            - PACKAGE_VULNERABILITY
+      State: ENABLED
+      Targets:
+        - Id: InspectorEksLogTarget
+          Arn: !GetAtt InspectorEksLogGroup.Arn
+
+  ##########################################################################
+  # Patch / version drift checker (Lambda + schedule)
+  ##########################################################################
+  PatchCheckDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${DashboardName}-patch-check-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref EksSecurityKmsKey
+
+  PatchCheckLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${DashboardName}-patch-check"
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt EksSecurityKmsKey.Arn
+
+  PatchCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${DashboardName}-patch-check-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
+      Policies:
+        - PolicyName: EksReadAndMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListClustersAndNodegroups
+                Effect: Allow
+                Action:
+                  - eks:ListClusters
+                  - eks:ListNodegroups
+                Resource: "*" # These List actions do not support resource-level permissions
+              - Sid: DescribeClusters
+                Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                Resource: !Sub "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/*"
+              - Sid: DescribeNodegroups
+                Effect: Allow
+                Action:
+                  - eks:DescribeNodegroup
+                Resource: !Sub "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:nodegroup/*"
+              - Sid: PublishDashboardMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*" # PutMetricData does not support resource-level permissions
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: EKS/Security
+              - Sid: SendToDlq
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt PatchCheckDlq.Arn
+
+  PatchCheckFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: PatchCheckLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              This function calls the EKS, CloudWatch, and Secrets-free
+              global/regional AWS APIs on a schedule; a VPC would only add
+              NAT gateway cost with no security benefit for a read-only
+              drift check.
+          - id: CKV_AWS_272
+            comment: >-
+              No AWS Signer code-signing pipeline exists for this account;
+              out of scope for a public template repo since the profile ARN
+              is account-specific.
+    Properties:
+      FunctionName: !Sub ${DashboardName}-patch-check
+      Description: Scans every EKS cluster/nodegroup for version drift and stale AMIs, and publishes counts as CloudWatch metrics.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 256
+      Role: !GetAtt PatchCheckRole.Arn
+      ReservedConcurrentExecutions: 1
+      KmsKeyArn: !GetAtt EksSecurityKmsKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt PatchCheckDlq.Arn
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          LATEST_EKS_VERSION: !Ref LatestEksVersion
+          STALE_AMI_DAYS: !Ref StaleAmiDays
+      Code:
+        ZipFile: |
+          # Inline copy - kept in sync by hand with the canonical source at
+          # terraform/eks-security-dashboard/lambda/eks_patch_drift_checker.py.
+          # Kept inline here so this template is a self-contained single-file
+          # deploy; swap to an S3 CodeUri for production pipelines.
+          import datetime
+          import os
+
+          import boto3
+
+          eks = boto3.client("eks")
+          cloudwatch = boto3.client("cloudwatch")
+
+          NAMESPACE = "EKS/Security"
+          LATEST_VERSION = os.environ.get("LATEST_EKS_VERSION", "1.31")
+          STALE_AMI_DAYS = int(os.environ.get("STALE_AMI_DAYS", "60"))
+
+
+          def _put_metric(name, value, dimensions=None):
+              datum = {
+                  "MetricName": name,
+                  "Value": float(value),
+                  "Unit": "Count",
+                  "Timestamp": datetime.datetime.utcnow(),
+              }
+              if dimensions:
+                  datum["Dimensions"] = dimensions
+              cloudwatch.put_metric_data(Namespace=NAMESPACE, MetricData=[datum])
+
+
+          def lambda_handler(event, context):
+              clusters = eks.list_clusters()["clusters"]
+
+              version_drift = 0
+              nodegroups_needing_update = 0
+              nodegroup_health_issues = 0
+              stale_ami_nodegroups = 0
+              public_only_endpoint_clusters = 0
+
+              for cluster_name in clusters:
+                  cluster = eks.describe_cluster(name=cluster_name)["cluster"]
+                  cluster_version = cluster.get("version")
+                  is_drifted = bool(cluster_version and cluster_version != LATEST_VERSION)
+                  if is_drifted:
+                      version_drift += 1
+
+                  vpc_config = cluster.get("resourcesVpcConfig", {})
+                  if vpc_config.get("endpointPublicAccess") and not vpc_config.get("endpointPrivateAccess"):
+                      public_only_endpoint_clusters += 1
+
+                  _put_metric(
+                      "ClusterVersionDrift",
+                      1 if is_drifted else 0,
+                      dimensions=[{"Name": "ClusterName", "Value": cluster_name}],
+                  )
+
+                  nodegroups = eks.list_nodegroups(clusterName=cluster_name)["nodegroups"]
+                  for ng_name in nodegroups:
+                      ng = eks.describe_nodegroup(clusterName=cluster_name, nodegroupName=ng_name)["nodegroup"]
+
+                      ng_version = ng.get("version")
+                      if ng_version and ng_version != LATEST_VERSION:
+                          nodegroups_needing_update += 1
+
+                      issues = ng.get("health", {}).get("issues", [])
+                      if issues:
+                          nodegroup_health_issues += len(issues)
+
+                      release_version = ng.get("releaseVersion", "")
+                      if release_version:
+                          parts = release_version.split("-")
+                          if len(parts) >= 2:
+                              date_str = parts[1]
+                              try:
+                                  release_date = datetime.datetime.strptime(date_str, "%Y%m%d")
+                                  age_days = (datetime.datetime.utcnow() - release_date).days
+                                  if age_days > STALE_AMI_DAYS:
+                                      stale_ami_nodegroups += 1
+                              except ValueError:
+                                  # Custom AMI or unexpected format; skip age check
+                                  pass
+
+              _put_metric("ClustersScanned", len(clusters))
+              _put_metric("ClusterVersionDriftCount", version_drift)
+              _put_metric("PublicOnlyEndpointClusters", public_only_endpoint_clusters)
+              _put_metric("NodegroupsNeedingUpdate", nodegroups_needing_update)
+              _put_metric("NodegroupHealthIssues", nodegroup_health_issues)
+              _put_metric("StaleAmiNodegroups", stale_ami_nodegroups)
+
+              return {
+                  "statusCode": 200,
+                  "body": {
+                      "clustersScanned": len(clusters),
+                      "clusterVersionDriftCount": version_drift,
+                      "publicOnlyEndpointClusters": public_only_endpoint_clusters,
+                      "nodegroupsNeedingUpdate": nodegroups_needing_update,
+                      "nodegroupHealthIssues": nodegroup_health_issues,
+                      "staleAmiNodegroups": stale_ami_nodegroups,
+                  },
+              }
+
+  PatchCheckScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${DashboardName}-patch-check-schedule
+      ScheduleExpression: !Ref PatchCheckSchedule
+      State: ENABLED
+      Targets:
+        - Id: PatchCheckTarget
+          Arn: !GetAtt PatchCheckFunction.Arn
+
+  PatchCheckPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PatchCheckFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PatchCheckScheduleRule.Arn
+
+Outputs:
+  GuardDutyEksLogGroupName:
+    Value: !Ref GuardDutyEksLogGroup
+
+  InspectorEksLogGroupName:
+    Value: !Ref InspectorEksLogGroup
+
+  PatchCheckFunctionName:
+    Value: !Ref PatchCheckFunction
+
+  PatchCheckLogGroupName:
+    Description: Log group for the patch-check Lambda (its own execution logs, not the EventBridge-fed finding logs above)
+    Value: !Ref PatchCheckLogGroup

@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AI service adoption/inventory dashboard. A daily Lambda scans every enabled
+  region in the account and checks whether Bedrock, Bedrock Agents, Bedrock
+  Guardrails, Rekognition, Comprehend, and Textract have published any
+  CloudWatch metrics there (a signal of actual usage, not just regional
+  availability), then publishes a 1/0 "ServiceActive" custom metric per
+  service/region. The dashboard renders that as a per-region breakdown for
+  each service, so a security engineer can spot shadow AI adoption — a
+  service quietly in use in a region nobody signed off on. Works in AWS
+  commercial and AWS GovCloud.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: ai-service-inventory
+    Description: Prefix applied to all resource names created by this stack.
+    AllowedPattern: "^[a-z0-9-]{1,40}$"
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention period for the inventory-collector Lambda's log group.
+      Defaults to 365 to satisfy Checkov CKV_AWS_338 (retain at least 1 year).
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  MetricNamespace:
+    Type: String
+    Default: AIServiceInventory
+    Description: CloudWatch custom metric namespace the inventory-collector Lambda publishes into.
+
+  InventorySchedule:
+    Type: String
+    Default: rate(1 day)
+    Description: EventBridge schedule expression for the inventory-collector Lambda.
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key used to encrypt the inventory-collector's log group, env vars,
+  # and DLQ
+  # ---------------------------------------------------------------------
+  InventoryKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts inventory-collector resources for the ${NamePrefix} dashboard"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowLambdaAndSqsServices",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com", "sqs.amazonaws.com"]
+              },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+
+  InventoryKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}-observability"
+      TargetKeyId: !Ref InventoryKmsKey
+
+  # ---------------------------------------------------------------------
+  # Dead-letter queue for the inventory-collector Lambda
+  # ---------------------------------------------------------------------
+  InventoryCollectorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${NamePrefix}-collector-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref InventoryKmsKey
+
+  # ---------------------------------------------------------------------
+  # Log group for the inventory-collector Lambda
+  # ---------------------------------------------------------------------
+  InventoryCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NamePrefix}-collector"
+      RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt InventoryKmsKey.Arn
+
+  # ---------------------------------------------------------------------
+  # IAM role for the inventory-collector Lambda
+  # ---------------------------------------------------------------------
+  InventoryCollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-collector-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
+      Policies:
+        - PolicyName: inventory-scan-and-metric-publish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListEnabledRegions
+                Effect: Allow
+                Action:
+                  - ec2:DescribeRegions
+                Resource: "*" # DescribeRegions does not support resource-level permissions
+              - Sid: ListServiceMetricsAcrossRegions
+                Effect: Allow
+                Action:
+                  - cloudwatch:ListMetrics
+                Resource: "*" # ListMetrics does not support resource-level permissions
+              - Sid: PublishInventoryMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*" # PutMetricData does not support resource-level permissions
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref MetricNamespace
+              - Sid: SendToDlq
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt InventoryCollectorDlq.Arn
+
+  # ---------------------------------------------------------------------
+  # Inventory-collector Lambda: scans every enabled region for CloudWatch
+  # metric activity under each watched AI service's namespace, and
+  # republishes presence as a 1/0 custom metric per service/region.
+  # ---------------------------------------------------------------------
+  InventoryCollectorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: InventoryCollectorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              This function calls EC2 DescribeRegions and CloudWatch
+              ListMetrics/PutMetricData across every enabled region — all
+              regional public endpoints with no VPC endpoint coverage in
+              every region, so a VPC would require NAT gateways in every
+              region with no security benefit for a read-only inventory scan.
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-collector"
+      Description: Scans enabled regions for AI service CloudWatch activity and publishes a presence metric per service/region.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt InventoryCollectorRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      KmsKeyArn: !GetAtt InventoryKmsKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt InventoryCollectorDlq.Arn
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          METRIC_NAMESPACE: !Ref MetricNamespace
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+
+          METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "AIServiceInventory")
+
+          # Label -> CloudWatch namespace to probe for activity in each region.
+          SERVICES = {
+              "Bedrock": "AWS/Bedrock",
+              "BedrockAgents": "AWS/Bedrock/Agents",
+              "BedrockGuardrails": "AWS/Bedrock/Guardrails",
+              "Rekognition": "AWS/Rekognition",
+              "Comprehend": "AWS/Comprehend",
+              "Textract": "AWS/Textract",
+          }
+
+
+          def chunked(items, size):
+              for i in range(0, len(items), size):
+                  yield items[i:i + size]
+
+
+          def handler(event, context):
+              ec2 = boto3.client("ec2")
+              regions = [r["RegionName"] for r in ec2.describe_regions(AllRegions=False)["Regions"]]
+
+              metric_data = []
+              for region in regions:
+                  region_cw = boto3.client("cloudwatch", region_name=region)
+                  for service_label, namespace in SERVICES.items():
+                      try:
+                          resp = region_cw.list_metrics(Namespace=namespace)
+                          is_active = len(resp.get("Metrics", [])) > 0
+                      except Exception:
+                          # A region/namespace combo erroring (e.g. opt-in
+                          # region without the service) counts as inactive,
+                          # not a failure of the whole scan.
+                          is_active = False
+
+                      metric_data.append({
+                          "MetricName": "ServiceActive",
+                          "Dimensions": [
+                              {"Name": "Service", "Value": service_label},
+                              {"Name": "Region", "Value": region},
+                          ],
+                          "Value": 1 if is_active else 0,
+                          "Unit": "None",
+                      })
+
+              home_cw = boto3.client("cloudwatch")
+              for batch in chunked(metric_data, 20):
+                  home_cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=batch)
+
+              return {"regions_checked": len(regions), "metrics_published": len(metric_data)}
+
+  # ---------------------------------------------------------------------
+  # Schedule the inventory collector
+  # ---------------------------------------------------------------------
+  InventoryCollectorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-collector-schedule"
+      Description: Triggers the AI service inventory-collector Lambda on a schedule.
+      ScheduleExpression: !Ref InventorySchedule
+      State: ENABLED
+      Targets:
+        - Id: InventoryCollectorTarget
+          Arn: !GetAtt InventoryCollectorFunction.Arn
+
+  InventoryCollectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InventoryCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InventoryCollectorSchedule.Arn
+
+  # ---------------------------------------------------------------------
+  # Dashboard
+Outputs:
+  InventoryCollectorFunctionName:
+    Description: Name of the scheduled inventory-collector Lambda
+    Value: !Ref InventoryCollectorFunction
+
+  InventoryCollectorLogGroupName:
+    Description: Log group for the inventory-collector Lambda
+    Value: !Ref InventoryCollectorLogGroup

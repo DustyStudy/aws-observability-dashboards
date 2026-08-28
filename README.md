@@ -65,6 +65,19 @@ This means every dashboard here is really three building blocks
 (EventBridge → Logs → Dashboard) that you can extend or recombine for your own
 custom dashboards.
 
+## Org-wide, multi-account deployment
+
+By default every dashboard here is a single-account deployment
+(`template.yaml` / `main.tf`). For running across an entire AWS
+Organization from one central monitoring account, see
+[`org-observability/`](org-observability/README.md) — it adds a CloudWatch
+Observability Access Manager (OAM) sink/link setup plus a `collector` +
+`org-dashboard` split for each dashboard, deployed via CloudFormation
+StackSets. Two dashboards (`nhi-governance-dashboard`,
+`agentic-ai-guardrails-dashboard`) have full org-wide versions today; the
+rest have their collector half split out and ready, with the org-dashboard
+recipe documented for finishing them.
+
 ## Requirements
 
 - Security Hub and/or GuardDuty enabled in the account/region (for the security

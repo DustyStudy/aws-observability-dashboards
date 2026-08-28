@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Org-wide NHI governance dashboard. Deploy this ONCE, in your central
+  monitoring account (the one holding the OAM sink — see
+  ../../org-observability/oam-sink), after every member account has both an
+  OAM Link (../../org-observability/oam-link) and the NHI collector
+  (collector.yaml in this folder) deployed via StackSets. This template
+  contains no scanning logic of its own — it only builds a cross-account
+  CloudWatch dashboard that reads the metrics every linked account's
+  collector already publishes locally.
+
+  CloudFormation's native intrinsic functions can't loop-generate JSON
+  content inside a DashboardBody string, so this uses a small Lambda-backed
+  custom resource to render the dashboard from a list of member account IDs
+  at deploy time. The Terraform version of this same dashboard
+  (org-dashboard.tf) does this natively with a `for` expression — no custom
+  resource needed there.
+
+Parameters:
+  DashboardName:
+    Type: String
+    Default: nhi-governance-org-dashboard
+    Description: Name of the cross-account CloudWatch dashboard.
+
+  MemberAccountIds:
+    Type: CommaDelimitedList
+    Description: >-
+      Every member account ID whose NHI-collector metrics should appear on
+      this dashboard (the same accounts you deployed collector.yaml and the
+      OAM Link to). Does not need to include the monitoring account itself
+      unless it also runs its own collector.
+
+  MetricNamespace:
+    Type: String
+    Default: NHIGovernance
+    Description: Must match the MetricNamespace parameter used when deploying collector.yaml in every member account.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 365
+    Description: Retention for the dashboard-generator Lambda's own log group.
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key encrypting the generator Lambda's log group
+  # ---------------------------------------------------------------------
+  DashboardGeneratorKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts the ${DashboardName} generator Lambda's log group"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*",
+                "kms:GenerateDataKey*", "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            }
+          ]
+        }
+
+  DashboardGeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${DashboardName}-generator"
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt DashboardGeneratorKmsKey.Arn
+
+  # ---------------------------------------------------------------------
+  # IAM role for the generator Lambda — only touches the one dashboard it owns
+  # ---------------------------------------------------------------------
+  DashboardGeneratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${DashboardName}-generator-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: manage-this-dashboard-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:DeleteDashboard
+                  - cloudwatch:GetDashboard
+                Resource: !Sub "arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/${DashboardName}"
+
+  # ---------------------------------------------------------------------
+  # Generator Lambda — renders and applies the DashboardBody at deploy time
+  # ---------------------------------------------------------------------
+  DashboardGeneratorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DashboardGeneratorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              CloudFormation custom-resource Lambda that only calls the
+              regional CloudWatch control-plane API at deploy time; a VPC
+              would add nothing but a NAT gateway bill.
+          - id: CKV_AWS_272
+            comment: >-
+              No AWS Signer code-signing pipeline exists for this account;
+              out of scope for a public template repo since the profile ARN
+              is account-specific.
+    Properties:
+      FunctionName: !Sub "${DashboardName}-generator"
+      Description: CloudFormation custom-resource handler that builds and applies the org-wide NHI dashboard's DashboardBody.
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt DashboardGeneratorRole.Arn
+      KmsKeyArn: !GetAtt DashboardGeneratorKmsKey.Arn
+      TracingConfig:
+        Mode: Active
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          cloudwatch = boto3.client("cloudwatch")
+
+
+          def send_cfn_response(event, context, status, data=None, physical_resource_id=None, reason=None):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
+                  "PhysicalResourceId": physical_resource_id or event.get("PhysicalResourceId") or event["LogicalResourceId"],
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "NoEcho": False,
+                  "Data": data or {},
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  event["ResponseURL"], data=body, method="PUT",
+                  headers={"Content-Type": "", "Content-Length": str(len(body))},
+              )
+              urllib.request.urlopen(req)
+
+
+          # ---------------------------------------------------------------
+          # Widget builders. Every widget here sums the same un-dimensioned
+          # metric across every linked member account via a hidden
+          # per-account metric expression plus one visible SUM() expression
+          # — this is the general recipe for "org rollup" widgets: replace
+          # a single-account metric entry with one entry per account
+          # (each carrying its own "accountId"), then combine with metric
+          # math. See ../../org-observability/README.md for how to apply
+          # this same pattern to the other six dashboards in this repo.
+          # ---------------------------------------------------------------
+          def _sum_across_accounts(namespace, metric_name, account_ids, label, stat="Maximum", period=86400, id_prefix="m"):
+              entries = []
+              ids = []
+              for i, acct in enumerate(account_ids):
+                  mid = f"{id_prefix}{i}"
+                  ids.append(mid)
+                  entries.append([namespace, metric_name, {
+                      "stat": stat, "period": period, "accountId": acct,
+                      "id": mid, "visible": False,
+                  }])
+              entries.append([{
+                  "expression": f"SUM([{','.join(ids)}])",
+                  "label": label,
+                  "id": f"total_{id_prefix}",
+              }])
+              return entries
+
+
+          def _single_value_widget(x, y, w, h, title, namespace, metric_name, account_ids, region):
+              return {
+                  "type": "metric", "x": x, "y": y, "width": w, "height": h,
+                  "properties": {
+                      "title": title, "view": "singleValue", "region": region,
+                      "metrics": _sum_across_accounts(namespace, metric_name, account_ids, title),
+                  },
+              }
+
+
+          def _identity_provider_single_value(x, y, w, h, namespace, account_ids, region):
+              oidc = _sum_across_accounts(namespace, "OidcProviders", account_ids, "OIDC", id_prefix="oidc")
+              saml = _sum_across_accounts(namespace, "SamlProviders", account_ids, "SAML", id_prefix="saml")
+              # The last entry each of _sum_across_accounts() returns is the
+              # visible "total_<prefix>" expression; hide both here since
+              # this widget shows one combined number instead.
+              oidc[-1][0]["visible"] = False
+              saml[-1][0]["visible"] = False
+              metrics = oidc + saml + [[{
+                  "expression": "total_oidc+total_saml",
+                  "label": "Identity Providers (org-wide)",
+                  "id": "provider_total",
+              }]]
+              return {
+                  "type": "metric", "x": x, "y": y, "width": w, "height": h,
+                  "properties": {
+                      "title": "Workload Identity Providers (OIDC+SAML, org-wide)",
+                      "view": "singleValue", "region": region, "metrics": metrics,
+                  },
+              }
+
+
+          def _trend_widget(x, y, w, h, title, namespace, series, account_ids, region):
+              metrics = []
+              for i, (metric_name, label, stat) in enumerate(series):
+                  metrics.extend(_sum_across_accounts(namespace, metric_name, account_ids, label, stat=stat, id_prefix=f"s{i}_"))
+              return {
+                  "type": "metric", "x": x, "y": y, "width": w, "height": h,
+                  "properties": {"title": title, "view": "timeSeries", "region": region, "metrics": metrics},
+              }
+
+
+          def _secrets_by_account_region_widget(x, y, w, h, namespace, account_ids, region):
+              metrics = []
+              for i, acct in enumerate(account_ids):
+                  metrics.append([{
+                      "expression": f"SEARCH('{{{namespace},Region}} MetricName=\"SecretsWithoutRotation\"', 'Maximum', 86400)",
+                      "id": f"s{i}",
+                      "accountId": acct,
+                      "label": acct + " - ${PROP('Dim.Region')}",
+                  }])
+              return {
+                  "type": "metric", "x": x, "y": y, "width": w, "height": h,
+                  "properties": {
+                      "title": "Secrets Manager \u2013 Secrets Without Rotation by Account/Region",
+                      "view": "bar", "region": region, "metrics": metrics,
+                  },
+              }
+
+
+          def _provider_bar_widget(x, y, w, h, namespace, account_ids, region):
+              metrics = []
+              metrics.extend(_sum_across_accounts(namespace, "OidcProviders", account_ids, "OIDC", id_prefix="oidcbar"))
+              metrics.extend(_sum_across_accounts(namespace, "SamlProviders", account_ids, "SAML", id_prefix="samlbar"))
+              return {
+                  "type": "metric", "x": x, "y": y, "width": w, "height": h,
+                  "properties": {
+                      "title": "Workload Identity Providers \u2013 OIDC vs SAML (org-wide)",
+                      "view": "bar", "region": region, "metrics": metrics,
+                  },
+              }
+
+
+          def build_dashboard_body(namespace, account_ids, region):
+              widgets = [
+                  _single_value_widget(0, 0, 4, 4, "Stale Access Keys (org-wide)", namespace, "StaleAccessKeys", account_ids, region),
+                  _single_value_widget(4, 0, 4, 4, "Users Without MFA (org-wide)", namespace, "UsersWithoutMfa", account_ids, region),
+                  _single_value_widget(8, 0, 4, 4, "Inactive IAM Users (org-wide)", namespace, "InactiveIamUsers", account_ids, region),
+                  _single_value_widget(12, 0, 4, 4, "Stale IAM Roles (org-wide)", namespace, "StaleIamRoles", account_ids, region),
+                  _single_value_widget(16, 0, 4, 4, "External-Trust Roles (org-wide)", namespace, "ExternalTrustRoles", account_ids, region),
+                  _identity_provider_single_value(20, 0, 4, 4, namespace, account_ids, region),
+                  _trend_widget(0, 4, 12, 6, "Access Keys: Total vs Stale (org-wide trend)", namespace,
+                                [("TotalActiveAccessKeys", "Total Active Keys", "Maximum"),
+                                 ("StaleAccessKeys", "Stale Keys", "Maximum")], account_ids, region),
+                  _trend_widget(12, 4, 12, 6, "IAM Roles: Total vs Stale (org-wide trend)", namespace,
+                                [("TotalIamRoles", "Total Roles", "Maximum"),
+                                 ("StaleIamRoles", "Stale Roles", "Maximum")], account_ids, region),
+                  _secrets_by_account_region_widget(0, 10, 12, 6, namespace, account_ids, region),
+                  _provider_bar_widget(12, 10, 12, 6, namespace, account_ids, region),
+              ]
+              return {"widgets": widgets}
+
+
+          def handler(event, context):
+              request_type = event["RequestType"]
+              props = event.get("ResourceProperties", {})
+              dashboard_name = props["DashboardName"]
+
+              try:
+                  if request_type in ("Create", "Update"):
+                      namespace = props.get("MetricNamespace", "NHIGovernance")
+                      account_ids = props["MemberAccountIds"]
+                      if isinstance(account_ids, str):
+                          account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      region = props.get("Region") or context.invoked_function_arn.split(":")[3]
+
+                      body = build_dashboard_body(namespace, account_ids, region)
+                      cloudwatch.put_dashboard(DashboardName=dashboard_name, DashboardBody=json.dumps(body))
+                      send_cfn_response(event, context, "SUCCESS", physical_resource_id=dashboard_name)
+
+                  elif request_type == "Delete":
+                      physical_id = event.get("PhysicalResourceId", dashboard_name)
+                      try:
+                          cloudwatch.delete_dashboard(DashboardNames=[physical_id])
+                      except ClientError as exc:
+                          if exc.response["Error"]["Code"] not in ("ResourceNotFound", "ResourceNotFoundException"):
+                              raise
+                      send_cfn_response(event, context, "SUCCESS", physical_resource_id=physical_id)
+
+                  else:
+                      send_cfn_response(event, context, "SUCCESS", physical_resource_id=dashboard_name)
+
+              except Exception as exc:
+                  print(f"ERROR: {exc}")
+                  send_cfn_response(event, context, "FAILED", reason=str(exc),
+                                     physical_resource_id=event.get("PhysicalResourceId", dashboard_name))
+
+  # ---------------------------------------------------------------------
+  # The custom resource that actually triggers the Lambda above
+  # ---------------------------------------------------------------------
+  OrgDashboard:
+    Type: Custom::NhiOrgDashboard
+    Properties:
+      ServiceToken: !GetAtt DashboardGeneratorFunction.Arn
+      DashboardName: !Ref DashboardName
+      MemberAccountIds: !Join [",", !Ref MemberAccountIds]
+      MetricNamespace: !Ref MetricNamespace
+      Region: !Ref "AWS::Region"
+
+Outputs:
+  DashboardUrl:
+    Description: Console URL to open the cross-account dashboard directly
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${DashboardName}"
