@@ -1,17 +1,11 @@
 version: 2
 updates:
+  # Keeps the SHA-pinned actions in ci.yml current. Dependabot reads the
+  # trailing "# vX.Y.Z" comment next to each pinned SHA and opens a PR that
+  # updates both the SHA and the comment when a new release comes out — the
+  # pin never goes stale, and every update is a reviewable diff instead of a
+  # silent change to a mutable tag.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    groups:
-      github-actions:
-        patterns: ["*"]
-
-  - package-ecosystem: "terraform"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    groups:
-      terraform:
-        patterns: ["*"]

@@ -92,6 +92,15 @@ GitHub Actions runs on every push/PR:
 - **CloudFormation:** cfn-lint, Checkov
 - **Terraform:** `terraform fmt -check`, `terraform validate`, tflint, Checkov
 
+The workflow itself follows GitHub's CI/CD hardening guidance: every
+third-party action is pinned to a full-length commit SHA rather than a
+mutable tag or branch (with the human-readable version kept as a trailing
+comment so Dependabot can still propose updates), the default `GITHUB_TOKEN`
+permission is restricted to `contents: read`, checkout steps don't persist
+credentials for later steps to pick up, and both jobs have an explicit
+timeout. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and
+[`.github/dependabot.yml`](.github/dependabot.yml).
+
 ## License
 
 MIT — see [LICENSE](LICENSE)
