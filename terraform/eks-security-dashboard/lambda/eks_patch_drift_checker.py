@@ -45,7 +45,7 @@ def lambda_handler(event, context):
     nodegroups_needing_update = 0
     nodegroup_health_issues = 0
     stale_ami_nodegroups = 0
-    unencrypted_or_public_clusters = 0
+    public_only_endpoint_clusters = 0
 
     for cluster_name in clusters:
         cluster = eks.describe_cluster(name=cluster_name)["cluster"]
@@ -58,7 +58,7 @@ def lambda_handler(event, context):
         if vpc_config.get("endpointPublicAccess") and not vpc_config.get(
             "endpointPrivateAccess"
         ):
-            unencrypted_or_public_clusters += 1
+            public_only_endpoint_clusters += 1
 
         _put_metric(
             "ClusterVersionDrift",
@@ -100,7 +100,7 @@ def lambda_handler(event, context):
 
     _put_metric("ClustersScanned", len(clusters))
     _put_metric("ClusterVersionDriftCount", version_drift)
-    _put_metric("PublicOnlyEndpointClusters", unencrypted_or_public_clusters)
+    _put_metric("PublicOnlyEndpointClusters", public_only_endpoint_clusters)
     _put_metric("NodegroupsNeedingUpdate", nodegroups_needing_update)
     _put_metric("NodegroupHealthIssues", nodegroup_health_issues)
     _put_metric("StaleAmiNodegroups", stale_ami_nodegroups)
@@ -110,7 +110,7 @@ def lambda_handler(event, context):
         "body": {
             "clustersScanned": len(clusters),
             "clusterVersionDriftCount": version_drift,
-            "publicOnlyEndpointClusters": unencrypted_or_public_clusters,
+            "publicOnlyEndpointClusters": public_only_endpoint_clusters,
             "nodegroupsNeedingUpdate": nodegroups_needing_update,
             "nodegroupHealthIssues": nodegroup_health_issues,
             "staleAmiNodegroups": stale_ami_nodegroups,

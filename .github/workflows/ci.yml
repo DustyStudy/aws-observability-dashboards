@@ -41,12 +41,16 @@ jobs:
 
       - name: Run cfn-lint
         run: |
-          find cloudformation -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
+          find cloudformation org-observability -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
 
       - name: Run Checkov (CloudFormation)
         uses: bridgecrewio/checkov-action@v12.3118.0
         with:
-          directory: cloudformation
+          # Repo root so this also picks up org-observability/, and any
+          # future dashboard folder, without needing a CI change every time.
+          # Checkov's cloudformation parser ignores non-CFN yaml, so this
+          # doesn't pick up unrelated yaml files.
+          directory: .
           framework: cloudformation
           soft_fail: false
 
@@ -61,34 +65,54 @@ jobs:
           persist-credentials: false
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "1.9.0"
 
       - name: Terraform fmt check
-        run: terraform fmt -check -recursive terraform
+        # Repo root (not just "terraform") so org-observability/'s .tf files
+        # are covered too. terraform fmt only touches *.tf/*.tfvars, so this
+        # is safe to run from the root.
+        run: terraform fmt -check -recursive .
 
-      - name: Terraform init & validate (per module)
+      - name: Terraform init & validate (all modules)
         run: |
-          for dir in terraform/*/; do
+          # Discover every directory that contains .tf files, not just the
+          # top-level terraform/<dashboard>/ dirs — this also covers each
+          # dashboard's nested collector/ and org-dashboard/ subfolders and
+          # org-observability/oam-link, org-observability/oam-sink.
+          find . -type d \( -name '.git' -o -name '.terraform' \) -prune -o -name '*.tf' -print \
+            | xargs -n1 dirname | sort -u > /tmp/tf_dirs.txt
+          while read -r dir; do
             echo "Validating $dir"
             (cd "$dir" && terraform init -backend=false && terraform validate)
-          done
+          done < /tmp/tf_dirs.txt
 
+      # NOTE: terraform-linters/setup-tflint is intentionally left on the
+      # major-version tag (not a commit SHA) for now — verify the exact
+      # commit for the tag you want (e.g. `gh api
+      # repos/terraform-linters/setup-tflint/git/refs/tags/v4`) and pin it,
+      # matching the checkout/setup-python/setup-terraform steps above.
       - name: Set up TFLint
         uses: terraform-linters/setup-tflint@v4
 
-      - name: Run TFLint (per module)
+      - name: Run TFLint (all modules)
         run: |
-          for dir in terraform/*/; do
+          find . -type d \( -name '.git' -o -name '.terraform' \) -prune -o -name '*.tf' -print \
+            | xargs -n1 dirname | sort -u > /tmp/tf_dirs.txt
+          while read -r dir; do
             echo "Linting $dir"
             (cd "$dir" && tflint)
-          done
+          done < /tmp/tf_dirs.txt
 
+      # NOTE: bridgecrewio/checkov-action is also left on a version tag, not
+      # a SHA — same caveat as setup-tflint above.
       - name: Run Checkov (Terraform)
         uses: bridgecrewio/checkov-action@v12.3118.0
         with:
-          directory: terraform
+          # Repo root so org-observability/'s .tf files (and any future
+          # dashboard) are covered without a CI change.
+          directory: .
           framework: terraform
           soft_fail: false
           # CKV_AWS_272 (Lambda code-signing) and CKV_AWS_117 (Lambda in a VPC)
