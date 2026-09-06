@@ -44,7 +44,7 @@ jobs:
           find cloudformation -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
 
       - name: Run Checkov (CloudFormation)
-        uses: bridgecrewio/checkov-action@v12.3118.0
+        uses: bridgecrewio/checkov-action@v12.3122.0
         with:
           directory: cloudformation
           framework: cloudformation
@@ -86,7 +86,7 @@ jobs:
           done
 
       - name: Run Checkov (Terraform)
-        uses: bridgecrewio/checkov-action@v12.3118.0
+        uses: bridgecrewio/checkov-action@v12.3122.0
         with:
           directory: terraform
           framework: terraform
