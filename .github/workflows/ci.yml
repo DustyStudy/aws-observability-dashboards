@@ -76,7 +76,7 @@ jobs:
           done
 
       - name: Set up TFLint
-        uses: terraform-linters/setup-tflint@v4
+        uses: terraform-linters/setup-tflint@v5
 
       - name: Run TFLint (per module)
         run: |
