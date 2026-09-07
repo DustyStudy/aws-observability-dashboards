@@ -129,8 +129,16 @@ sync by hand rather than built from one shared source file.
 That duplication is a real risk, not just a style note: it's how
 `eks-security-dashboard`'s Terraform copy ended up with a variable named
 `unencrypted_or_public_clusters` for a check that has nothing to do with
-encryption, while the CloudFormation copy kept the correct name. Two
-things guard against that happening silently again:
+encryption, while the CloudFormation copy kept the correct name. Adding
+these tests also surfaced a second, unrelated bug in the same file: both
+copies created their `boto3` clients at module import time instead of
+inside the handler (unlike the other four collectors), which works fine
+in a real Lambda invocation but crashes on `NoRegionError` the moment
+anything tries to import the module in an environment with no AWS region
+configured — exactly what pytest collection does in CI. Both copies now
+create clients lazily inside `lambda_handler`, matching the other four
+collectors. Two things guard against regressions like these happening
+silently again:
 
 - **`tests/`** — pytest unit tests for the non-trivial logic in each
   collector (stale-access-key/AMI date math, external-trust-policy
