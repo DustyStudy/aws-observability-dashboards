@@ -31,12 +31,8 @@ jobs:
           # git config for a later step to pick up by accident.
           persist-credentials: false
 
-      # NOTE: actions/setup-python is intentionally left on the major-version
-      # tag (not a commit SHA) for now — verify the exact commit for v7.0.0
-      # (e.g. `gh api repos/actions/setup-python/git/refs/tags/v7.0.0`) and
-      # pin it, matching checkout/setup-terraform above.
       - name: Set up Python
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -93,10 +89,10 @@ jobs:
           done < /tmp/tf_dirs.txt
 
       # NOTE: terraform-linters/setup-tflint is intentionally left on the
-      # major-version tag (not a commit SHA) for now, same as
-      # actions/setup-python above — verify the exact commit for the tag
-      # you want (e.g. `gh api repos/terraform-linters/setup-tflint/git/refs/tags/v5`)
-      # and pin it, matching checkout/setup-terraform above.
+      # major-version tag (not a commit SHA) for now — verify the exact
+      # commit for the tag you want
+      # (e.g. `gh api repos/terraform-linters/setup-tflint/git/refs/tags/v5`)
+      # and pin it, matching checkout/setup-terraform/setup-python above.
       - name: Set up TFLint
         uses: terraform-linters/setup-tflint@v5
 
@@ -145,7 +141,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 

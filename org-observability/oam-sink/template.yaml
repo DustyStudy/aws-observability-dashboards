@@ -36,7 +36,9 @@ Resources:
             Action:
               - oam:CreateLink
               - oam:UpdateLink
-            Resource: "*"
+            Resource: "*" # Resource-based policy on the sink itself; "*" here means
+              # "this sink", not "any resource" — access is scoped by the
+              # aws:PrincipalOrgID condition below, not by this field
             Condition:
               "ForAllValues:StringEquals":
                 "aws:PrincipalOrgID":
