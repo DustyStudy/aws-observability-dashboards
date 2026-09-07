@@ -1,5 +1,8 @@
 # aws-observability-dashboards
 
+[![CI](https://github.com/DustyStudy/aws-observability-dashboards/actions/workflows/ci.yml/badge.svg)](https://github.com/DustyStudy/aws-observability-dashboards/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 CloudFormation and Terraform templates for CloudWatch dashboards that give cloud
 security engineers visibility into security posture, AI/ML usage, and agentic AI
 activity across an AWS account or org. Companion repo to
@@ -30,15 +33,22 @@ Each dashboard folder is self-contained and deployable on its own.
 
 ## Dashboards
 
-| Dashboard | Status | Description |
-|---|---|---|
-| [security-posture-dashboard](cloudformation/security-posture-dashboard) | ✅ Built | Security Hub findings + GuardDuty findings — severity breakdown, top failing controls, findings by type, trend over time |
-| [bedrock-usage-cost-dashboard](cloudformation/bedrock-usage-cost-dashboard) | ✅ Built | Bedrock invocations, tokens, latency, errors/throttles by model (native metrics), plus estimated daily cost by usage type via a scheduled Cost Explorer collector |
-| [agentic-ai-guardrails-dashboard](cloudformation/agentic-ai-guardrails-dashboard) | ✅ Built | Bedrock Agents activity (invocations, latency, token usage, model-call health) + Bedrock Guardrails behavior (intervention rate, interventions by policy category, latency/errors) |
-| [ai-service-inventory-dashboard](cloudformation/ai-service-inventory-dashboard) | ✅ Built | Which regions actually have Bedrock, Bedrock Agents, Bedrock Guardrails, Rekognition, Comprehend, or Textract in active use — shadow AI adoption tracking via a scheduled multi-region CloudWatch scan |
-| [network-exposure-dashboard](cloudformation/network-exposure-dashboard) | ✅ Built | Internet-open security groups, public EC2/RDS/load balancers, exposed S3 buckets by region, plus optional VPC Flow Log rejected-connection trends and port-scan detection |
-| [nhi-governance-dashboard](cloudformation/nhi-governance-dashboard) | ✅ Built | Non-human identity risk: stale/unrotated access keys, users without MFA, inactive IAM users, stale IAM roles, external-trust roles, workload identity federation footprint, Secrets Manager rotation status |
-| [eks-security-dashboard](cloudformation/eks-security-dashboard) | ✅ Built | EKS cluster/nodegroup Kubernetes version drift, stale node AMIs, nodegroup health issues, public-only API endpoints, GuardDuty EKS Protection findings, Inspector container image vulnerabilities |
+| Dashboard | Status | Org-wide | Description |
+|---|---|---|---|
+| [security-posture-dashboard](cloudformation/security-posture-dashboard) | ✅ Built | Collector only | Security Hub findings + GuardDuty findings — severity breakdown, top failing controls, findings by type, trend over time |
+| [bedrock-usage-cost-dashboard](cloudformation/bedrock-usage-cost-dashboard) | ✅ Built | Collector only | Bedrock invocations, tokens, latency, errors/throttles by model (native metrics), plus estimated daily cost by usage type via a scheduled Cost Explorer collector |
+| [agentic-ai-guardrails-dashboard](cloudformation/agentic-ai-guardrails-dashboard) | ✅ Built | ✅ Full | Bedrock Agents activity (invocations, latency, token usage, model-call health) + Bedrock Guardrails behavior (intervention rate, interventions by policy category, latency/errors) |
+| [ai-service-inventory-dashboard](cloudformation/ai-service-inventory-dashboard) | ✅ Built | Collector only | Which regions actually have Bedrock, Bedrock Agents, Bedrock Guardrails, Rekognition, Comprehend, or Textract in active use — shadow AI adoption tracking via a scheduled multi-region CloudWatch scan |
+| [network-exposure-dashboard](cloudformation/network-exposure-dashboard) | ✅ Built | Collector only | Internet-open security groups, public EC2/RDS/load balancers, exposed S3 buckets by region, plus optional VPC Flow Log rejected-connection trends and port-scan detection |
+| [nhi-governance-dashboard](cloudformation/nhi-governance-dashboard) | ✅ Built | ✅ Full | Non-human identity risk: stale/unrotated access keys, users without MFA, inactive IAM users, stale IAM roles, external-trust roles, workload identity federation footprint, Secrets Manager rotation status |
+| [eks-security-dashboard](cloudformation/eks-security-dashboard) | ✅ Built | Collector only | EKS cluster/nodegroup Kubernetes version drift, stale node AMIs, nodegroup health issues, public-only API endpoints, GuardDuty EKS Protection findings, Inspector container image vulnerabilities |
+
+"Org-wide" refers to the multi-account setup described below: two
+dashboards (`nhi-governance`, `agentic-ai-guardrails`) have a complete
+central-account version today; the other five have their per-account
+collector half already split out and ready under
+[`org-observability/`](org-observability/README.md), with the
+org-dashboard side documented but not yet built for each.
 
 All five dashboards from the original roadmap are built, plus a sixth
 (nhi-governance) for non-human identity and a seventh (eks-security) for
@@ -73,10 +83,8 @@ Organization from one central monitoring account, see
 [`org-observability/`](org-observability/README.md) — it adds a CloudWatch
 Observability Access Manager (OAM) sink/link setup plus a `collector` +
 `org-dashboard` split for each dashboard, deployed via CloudFormation
-StackSets. Two dashboards (`nhi-governance-dashboard`,
-`agentic-ai-guardrails-dashboard`) have full org-wide versions today; the
-rest have their collector half split out and ready, with the org-dashboard
-recipe documented for finishing them.
+StackSets. See the "Org-wide" column in the dashboard table above for
+which dashboards have this today.
 
 ## Requirements
 
@@ -91,6 +99,9 @@ recipe documented for finishing them.
 GitHub Actions runs on every push/PR:
 - **CloudFormation:** cfn-lint, Checkov
 - **Terraform:** `terraform fmt -check`, `terraform validate`, tflint, Checkov
+- **Lambda collectors:** pytest unit tests, plus a script that fails the
+  build if a dashboard's CloudFormation and Terraform Lambda copies have
+  drifted apart (see [Tests](#tests) below)
 
 The workflow follows most of GitHub's CI/CD hardening guidance: the
 `checkout`, `setup-python`, and `setup-terraform` actions are pinned to a
@@ -106,6 +117,51 @@ repo, including `org-observability/` and each dashboard's nested
 `cloudformation/` and `terraform/` directories. See
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and
 [`.github/dependabot.yml`](.github/dependabot.yml).
+
+## Tests
+
+Each dashboard's Lambda collector ships as two independent copies of the
+same Python — an inline `ZipFile` in the CloudFormation template, and a
+standalone `.py` file zipped by Terraform's `archive` provider — because
+CFN has no packaging step and needs the code inline. The two are kept in
+sync by hand rather than built from one shared source file.
+
+That duplication is a real risk, not just a style note: it's how
+`eks-security-dashboard`'s Terraform copy ended up with a variable named
+`unencrypted_or_public_clusters` for a check that has nothing to do with
+encryption, while the CloudFormation copy kept the correct name. Two
+things guard against that happening silently again:
+
+- **`tests/`** — pytest unit tests for the non-trivial logic in each
+  collector (stale-access-key/AMI date math, external-trust-policy
+  detection, security-group/S3-exposure classification, EKS version-drift
+  and public-endpoint detection). Run them locally with:
+  ```
+  pip install -r tests/requirements.txt
+  pytest tests/ -v
+  ```
+- **`scripts/check_lambda_drift.py`** — tokenizes both copies of each
+  Lambda (ignoring comments, docstrings, and formatting differences like
+  line-wrapping) and fails if the underlying code doesn't match. Run it
+  with `python scripts/check_lambda_drift.py` after installing `pyyaml`.
+
+Both run in CI on every push/PR (the `lambda-tests` job).
+
+## Known limitations
+
+- **CFN/Terraform Lambda parity is enforced by CI, not by construction.**
+  See [Tests](#tests) above — the drift checker catches a mismatch, it
+  doesn't prevent one from being written in the first place.
+- **Dashboards are read-only observability, not remediation.** Nothing
+  here opens a PR, revokes a key, or closes a security group on your
+  behalf — that's a deliberate scope boundary, not a missing feature.
+- **Org-wide deployment assumes StackSets access to every member
+  account**, which some locked-down or FedRAMP-boundary AWS Organizations
+  restrict. If that's your environment, expect to adapt the org-dashboard
+  deployment step rather than run it as-is.
+- **Only 2 of 7 dashboards have a finished org-wide version** today (see
+  the "Org-wide" column above) — the rest have the per-account collector
+  half ready but need their central org-dashboard built.
 
 ## License
 
