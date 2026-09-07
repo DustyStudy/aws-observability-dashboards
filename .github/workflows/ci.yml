@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           # The GITHUB_TOKEN is never needed after checkout in this job
           # (no git push, no gh CLI calls), so don't leave it in the local
@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -41,12 +41,16 @@ jobs:
 
       - name: Run cfn-lint
         run: |
-          find cloudformation -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
+          find cloudformation org-observability -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
 
       - name: Run Checkov (CloudFormation)
         uses: bridgecrewio/checkov-action@v12.3122.0
         with:
-          directory: cloudformation
+          # Repo root so this also picks up org-observability/, and any
+          # future dashboard folder, without needing a CI change every time.
+          # Checkov's cloudformation parser ignores non-CFN yaml, so this
+          # doesn't pick up unrelated yaml files.
+          directory: .
           framework: cloudformation
           soft_fail: false
 
@@ -56,39 +60,59 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
         with:
           terraform_version: "1.9.0"
 
       - name: Terraform fmt check
-        run: terraform fmt -check -recursive terraform
+        # Repo root (not just "terraform") so org-observability/'s .tf files
+        # are covered too. terraform fmt only touches *.tf/*.tfvars, so this
+        # is safe to run from the root.
+        run: terraform fmt -check -recursive .
 
-      - name: Terraform init & validate (per module)
+      - name: Terraform init & validate (all modules)
         run: |
-          for dir in terraform/*/; do
+          # Discover every directory that contains .tf files, not just the
+          # top-level terraform/<dashboard>/ dirs — this also covers each
+          # dashboard's nested collector/ and org-dashboard/ subfolders and
+          # org-observability/oam-link, org-observability/oam-sink.
+          find . -type d \( -name '.git' -o -name '.terraform' \) -prune -o -name '*.tf' -print \
+            | xargs -n1 dirname | sort -u > /tmp/tf_dirs.txt
+          while read -r dir; do
             echo "Validating $dir"
             (cd "$dir" && terraform init -backend=false && terraform validate)
-          done
+          done < /tmp/tf_dirs.txt
 
+      # NOTE: terraform-linters/setup-tflint is intentionally left on the
+      # major-version tag (not a commit SHA) for now — verify the exact
+      # commit for the tag you want (e.g. `gh api
+      # repos/terraform-linters/setup-tflint/git/refs/tags/v4`) and pin it,
+      # matching the checkout/setup-python/setup-terraform steps above.
       - name: Set up TFLint
-        uses: terraform-linters/setup-tflint@v5
+        uses: terraform-linters/setup-tflint@v4
 
-      - name: Run TFLint (per module)
+      - name: Run TFLint (all modules)
         run: |
-          for dir in terraform/*/; do
+          find . -type d \( -name '.git' -o -name '.terraform' \) -prune -o -name '*.tf' -print \
+            | xargs -n1 dirname | sort -u > /tmp/tf_dirs.txt
+          while read -r dir; do
             echo "Linting $dir"
             (cd "$dir" && tflint)
-          done
+          done < /tmp/tf_dirs.txt
 
+      # NOTE: bridgecrewio/checkov-action is also left on a version tag, not
+      # a SHA — same caveat as setup-tflint above.
       - name: Run Checkov (Terraform)
         uses: bridgecrewio/checkov-action@v12.3122.0
         with:
-          directory: terraform
+          # Repo root so org-observability/'s .tf files (and any future
+          # dashboard) are covered without a CI change.
+          directory: .
           framework: terraform
           soft_fail: false
           # CKV_AWS_272 (Lambda code-signing) and CKV_AWS_117 (Lambda in a VPC)
@@ -105,3 +129,33 @@ jobs:
           # (Describe*, List*, PutMetricData, GenerateCredentialReport, etc.)
           # — each occurrence has an inline comment saying so.
           skip_check: CKV_AWS_272,CKV_AWS_117,CKV_AWS_356
+
+  lambda-tests:
+    name: Lambda unit tests + CFN/Terraform drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements.txt
+
+      - name: Run Lambda collector unit tests
+        run: pytest tests/ -v
+
+      - name: Check CFN/Terraform Lambda pairs haven't drifted
+        # Each dashboard's collector logic is hand-duplicated between its
+        # CFN inline ZipFile and its Terraform standalone .py file (see
+        # scripts/check_lambda_drift.py for why). This is what actually
+        # catches it if someone updates one copy and forgets the other.
+        run: |
+          pip install pyyaml
+          python scripts/check_lambda_drift.py

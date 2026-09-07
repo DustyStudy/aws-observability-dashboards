@@ -18,15 +18,12 @@ import os
 
 import boto3
 
-eks = boto3.client("eks")
-cloudwatch = boto3.client("cloudwatch")
-
 NAMESPACE = "EKS/Security"
 LATEST_VERSION = os.environ.get("LATEST_EKS_VERSION", "1.31")
 STALE_AMI_DAYS = int(os.environ.get("STALE_AMI_DAYS", "60"))
 
 
-def _put_metric(name, value, dimensions=None):
+def _put_metric(cloudwatch, name, value, dimensions=None):
     datum = {
         "MetricName": name,
         "Value": float(value),
@@ -39,13 +36,20 @@ def _put_metric(name, value, dimensions=None):
 
 
 def lambda_handler(event, context):
+    # Created here rather than at module import time so importing this
+    # module (e.g. for unit tests) never requires a resolvable AWS region —
+    # a real Lambda invocation always has one, but a local/CI Python
+    # process doesn't.
+    eks = boto3.client("eks")
+    cloudwatch = boto3.client("cloudwatch")
+
     clusters = eks.list_clusters()["clusters"]
 
     version_drift = 0
     nodegroups_needing_update = 0
     nodegroup_health_issues = 0
     stale_ami_nodegroups = 0
-    unencrypted_or_public_clusters = 0
+    public_only_endpoint_clusters = 0
 
     for cluster_name in clusters:
         cluster = eks.describe_cluster(name=cluster_name)["cluster"]
@@ -58,9 +62,10 @@ def lambda_handler(event, context):
         if vpc_config.get("endpointPublicAccess") and not vpc_config.get(
             "endpointPrivateAccess"
         ):
-            unencrypted_or_public_clusters += 1
+            public_only_endpoint_clusters += 1
 
         _put_metric(
+            cloudwatch,
             "ClusterVersionDrift",
             1 if is_drifted else 0,
             dimensions=[{"Name": "ClusterName", "Value": cluster_name}],
@@ -98,19 +103,19 @@ def lambda_handler(event, context):
                         # Custom AMI or unexpected format; skip age check
                         pass
 
-    _put_metric("ClustersScanned", len(clusters))
-    _put_metric("ClusterVersionDriftCount", version_drift)
-    _put_metric("PublicOnlyEndpointClusters", unencrypted_or_public_clusters)
-    _put_metric("NodegroupsNeedingUpdate", nodegroups_needing_update)
-    _put_metric("NodegroupHealthIssues", nodegroup_health_issues)
-    _put_metric("StaleAmiNodegroups", stale_ami_nodegroups)
+    _put_metric(cloudwatch, "ClustersScanned", len(clusters))
+    _put_metric(cloudwatch, "ClusterVersionDriftCount", version_drift)
+    _put_metric(cloudwatch, "PublicOnlyEndpointClusters", public_only_endpoint_clusters)
+    _put_metric(cloudwatch, "NodegroupsNeedingUpdate", nodegroups_needing_update)
+    _put_metric(cloudwatch, "NodegroupHealthIssues", nodegroup_health_issues)
+    _put_metric(cloudwatch, "StaleAmiNodegroups", stale_ami_nodegroups)
 
     return {
         "statusCode": 200,
         "body": {
             "clustersScanned": len(clusters),
             "clusterVersionDriftCount": version_drift,
-            "publicOnlyEndpointClusters": unencrypted_or_public_clusters,
+            "publicOnlyEndpointClusters": public_only_endpoint_clusters,
             "nodegroupsNeedingUpdate": nodegroups_needing_update,
             "nodegroupHealthIssues": nodegroup_health_issues,
             "staleAmiNodegroups": stale_ami_nodegroups,
