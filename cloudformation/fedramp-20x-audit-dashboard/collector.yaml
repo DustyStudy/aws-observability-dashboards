@@ -1,0 +1,407 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  FedRAMP 20x audit-evidence collector — the per-account half of
+  fedramp-20x-audit-dashboard, meant to be deployed via a CloudFormation
+  StackSet to every account in your organization (see
+  ../../org-observability/README.md). This stack has NO dashboard; it only
+  runs a daily scan of AWS Config, CloudTrail, AWS Backup, and IAM Access
+  Analyzer, and publishes metrics locally in whichever account it's deployed
+  to. It intentionally does NOT duplicate checks the other six dashboards in
+  this repo already publish (MFA/stale keys, open security groups, Security
+  Hub/GuardDuty findings) — the audit dashboard's widgets pull those from
+  their existing namespaces. Pair this with org-dashboard.yaml, deployed
+  once in your central monitoring account, to see every account's evidence
+  in one place. If you only care about a single account, use template.yaml
+  instead — it's identical to this file plus a local single-account
+  dashboard.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: fedramp-20x-audit
+    Description: Prefix applied to all resource names created by this stack.
+    AllowedPattern: "^[a-z0-9-]{1,40}$"
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention period for the collector Lambda's log group. Defaults to 365
+      to satisfy Checkov CKV_AWS_338 (retain at least 1 year).
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  MetricNamespace:
+    Type: String
+    Default: FedRAMP20xAudit
+    Description: CloudWatch custom metric namespace the collector Lambda publishes into.
+
+  AuditScanSchedule:
+    Type: String
+    Default: rate(1 day)
+    Description: EventBridge schedule expression for the collector Lambda.
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key used to encrypt the collector's log group, env vars, and DLQ
+  # ---------------------------------------------------------------------
+  AuditKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts FedRAMP 20x audit-collector resources for the ${NamePrefix} dashboard"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowLambdaAndSqsServices",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com", "sqs.amazonaws.com"]
+              },
+              "Action": [
+                "kms:Encrypt*",
+                "kms:Decrypt*",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+
+  AuditKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}-observability"
+      TargetKeyId: !Ref AuditKmsKey
+
+  # ---------------------------------------------------------------------
+  # Dead-letter queue for the collector Lambda
+  # ---------------------------------------------------------------------
+  AuditCollectorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${NamePrefix}-collector-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref AuditKmsKey
+
+  # ---------------------------------------------------------------------
+  # Log group for the collector Lambda
+  # ---------------------------------------------------------------------
+  AuditCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NamePrefix}-collector"
+      RetentionInDays: !Ref LogRetentionInDays
+      KmsKeyId: !GetAtt AuditKmsKey.Arn
+
+  # ---------------------------------------------------------------------
+  # IAM role for the collector Lambda
+  # ---------------------------------------------------------------------
+  AuditCollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-collector-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
+      Policies:
+        - PolicyName: audit-evidence-read-and-metric-publish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadConfigComplianceState
+                Effect: Allow
+                Action:
+                  - config:DescribeConfigurationRecorders
+                  - config:DescribeConfigurationRecorderStatus
+                  - config:DescribeComplianceByConfigRule
+                Resource: "*" # These read-only Config APIs do not support resource-level permissions
+              - Sid: ReadCloudTrailHealth
+                Effect: Allow
+                Action:
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:GetTrailStatus
+                Resource: "*" # Read-only trail-health checks across an account-wide, dynamic trail list
+              - Sid: ReadBackupCoverage
+                Effect: Allow
+                Action:
+                  - backup:ListBackupPlans
+                  - backup:ListBackupJobs
+                Resource: "*" # These read-only Backup APIs do not support resource-level permissions
+              - Sid: ReadAccessAnalyzerFindings
+                Effect: Allow
+                Action:
+                  - access-analyzer:ListAnalyzers
+                  - access-analyzer:ListFindings
+                Resource: "*" # Read-only checks across a dynamic, account-wide analyzer/finding list
+              - Sid: PublishAuditMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*" # PutMetricData does not support resource-level permissions
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref MetricNamespace
+              - Sid: SendToDlq
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt AuditCollectorDlq.Arn
+
+  # ---------------------------------------------------------------------
+  # Audit-evidence collector Lambda: checks AWS Config recorder/rule
+  # compliance, CloudTrail health, AWS Backup plan coverage and recent job
+  # outcomes, and IAM Access Analyzer external-access findings, then
+  # publishes counts as CloudWatch metrics. Flagged resource identifiers are
+  # printed to the Lambda's own CloudWatch Logs for triage, since metrics
+  # only carry numbers, not names. Kept in sync by hand with
+  # ../../terraform/fedramp-20x-audit-dashboard/lambda/fedramp20x_collector.py
+  # — the Terraform version packages that file directly instead of inlining it.
+  # ---------------------------------------------------------------------
+  AuditCollectorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: AuditCollectorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              This function calls global/regional read-only control-plane
+              APIs (Config, CloudTrail, Backup, Access Analyzer) with no VPC
+              endpoint benefit for a read-only audit-evidence scan, so a VPC
+              would mean NAT gateways for nothing.
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-collector"
+      Description: Checks AWS Config, CloudTrail, AWS Backup, and IAM Access Analyzer, and publishes FedRAMP 20x audit-evidence metrics.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt AuditCollectorRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      KmsKeyArn: !GetAtt AuditKmsKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt AuditCollectorDlq.Arn
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          METRIC_NAMESPACE: !Ref MetricNamespace
+      Code:
+        ZipFile: |
+          import os
+          from datetime import datetime, timedelta, timezone
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "FedRAMP20xAudit")
+
+
+          def _check_config(config, findings):
+              metrics = {"ConfigRecorderEnabled": 0, "ConfigRulesCompliant": 0, "ConfigRulesNonCompliant": 0}
+              try:
+                  recorders = config.describe_configuration_recorders().get("ConfigurationRecorders", [])
+                  statuses = config.describe_configuration_recorder_status().get("ConfigurationRecordersStatus", [])
+                  recording = any(s.get("recording") for s in statuses)
+                  metrics["ConfigRecorderEnabled"] = 1 if recorders and recording else 0
+                  if not metrics["ConfigRecorderEnabled"]:
+                      findings.append("CONFIG_RECORDER_NOT_ACTIVE")
+              except ClientError as exc:
+                  print(f"Config recorder check failed: {exc}")
+
+              try:
+                  paginator = config.get_paginator("describe_compliance_by_config_rule")
+                  for page in paginator.paginate():
+                      for rule in page.get("ComplianceByConfigRules", []):
+                          status = rule.get("Compliance", {}).get("ComplianceType")
+                          if status == "NON_COMPLIANT":
+                              metrics["ConfigRulesNonCompliant"] += 1
+                              findings.append(f"CONFIG_RULE_NON_COMPLIANT rule={rule.get('ConfigRuleName')}")
+                          elif status == "COMPLIANT":
+                              metrics["ConfigRulesCompliant"] += 1
+              except ClientError as exc:
+                  print(f"Config rule compliance check failed: {exc}")
+
+              return metrics
+
+
+          def _check_cloudtrail(cloudtrail, findings):
+              metrics = {
+                  "CloudTrailMultiRegionEnabled": 0,
+                  "CloudTrailLogFileValidationEnabled": 0,
+                  "CloudTrailLoggingActive": 0,
+              }
+              try:
+                  trails = cloudtrail.describe_trails(includeShadowTrails=False).get("trailList", [])
+                  if not trails:
+                      findings.append("NO_CLOUDTRAIL_TRAILS")
+                  for trail in trails:
+                      if trail.get("IsMultiRegionTrail"):
+                          metrics["CloudTrailMultiRegionEnabled"] = 1
+                      if trail.get("LogFileValidationEnabled"):
+                          metrics["CloudTrailLogFileValidationEnabled"] = 1
+                      try:
+                          status = cloudtrail.get_trail_status(Name=trail["TrailARN"])
+                          if status.get("IsLogging"):
+                              metrics["CloudTrailLoggingActive"] = 1
+                      except ClientError as exc:
+                          print(f"get_trail_status failed for {trail.get('Name')}: {exc}")
+              except ClientError as exc:
+                  print(f"CloudTrail check failed: {exc}")
+
+              return metrics
+
+
+          def _check_backups(backup, findings):
+              metrics = {"BackupPlansCount": 0, "BackupJobsSucceeded24h": 0, "BackupJobsFailed24h": 0}
+              try:
+                  plans = backup.list_backup_plans().get("BackupPlansList", [])
+                  metrics["BackupPlansCount"] = len(plans)
+                  if not plans:
+                      findings.append("NO_BACKUP_PLANS")
+              except ClientError as exc:
+                  print(f"Backup plan check failed: {exc}")
+
+              since = datetime.now(timezone.utc) - timedelta(days=1)
+              try:
+                  paginator = backup.get_paginator("list_backup_jobs")
+                  for page in paginator.paginate(ByCreatedAfter=since):
+                      for job in page.get("BackupJobs", []):
+                          state = job.get("State")
+                          if state == "FAILED":
+                              metrics["BackupJobsFailed24h"] += 1
+                              findings.append(f"BACKUP_JOB_FAILED resource={job.get('ResourceArn')}")
+                          elif state == "COMPLETED":
+                              metrics["BackupJobsSucceeded24h"] += 1
+              except ClientError as exc:
+                  print(f"Backup job check failed: {exc}")
+
+              return metrics
+
+
+          def _check_access_analyzer(analyzer_client, findings):
+              metrics = {"AccessAnalyzerActive": 0, "AccessAnalyzerExternalAccessFindings": 0}
+              try:
+                  analyzers = analyzer_client.list_analyzers(type="ACCOUNT").get("analyzers", [])
+                  active = [a for a in analyzers if a.get("status") == "ACTIVE"]
+                  metrics["AccessAnalyzerActive"] = 1 if active else 0
+                  if not active:
+                      findings.append("NO_ACTIVE_ACCESS_ANALYZER")
+                      return metrics
+
+                  for analyzer in active:
+                      try:
+                          paginator = analyzer_client.get_paginator("list_findings")
+                          for page in paginator.paginate(
+                              analyzerArn=analyzer["arn"], filter={"status": {"eq": ["ACTIVE"]}}
+                          ):
+                              for finding in page.get("findings", []):
+                                  metrics["AccessAnalyzerExternalAccessFindings"] += 1
+                                  findings.append(f"EXTERNAL_ACCESS_FINDING resource={finding.get('resource')}")
+                      except ClientError as exc:
+                          print(f"list_findings failed for {analyzer['arn']}: {exc}")
+              except ClientError as exc:
+                  print(f"Access Analyzer check failed: {exc}")
+
+              return metrics
+
+
+          def chunked(items, size):
+              for i in range(0, len(items), size):
+                  yield items[i:i + size]
+
+
+          def handler(event, context):
+              findings = []
+
+              config = boto3.client("config")
+              cloudtrail = boto3.client("cloudtrail")
+              backup = boto3.client("backup")
+              analyzer = boto3.client("accessanalyzer")
+
+              metrics = {}
+              metrics.update(_check_config(config, findings))
+              metrics.update(_check_cloudtrail(cloudtrail, findings))
+              metrics.update(_check_backups(backup, findings))
+              metrics.update(_check_access_analyzer(analyzer, findings))
+
+              metric_data = [
+                  {"MetricName": name, "Value": value, "Unit": "Count"} for name, value in metrics.items()
+              ]
+
+              cw = boto3.client("cloudwatch")
+              for batch in chunked(metric_data, 20):
+                  cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=batch)
+
+              for line in findings:
+                  print(line)
+
+              return {"metrics_published": len(metric_data), "findings": len(findings)}
+
+  # ---------------------------------------------------------------------
+  # Schedule the audit collector
+  # ---------------------------------------------------------------------
+  AuditCollectorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-collector-schedule"
+      Description: Triggers the FedRAMP 20x audit-evidence collector Lambda on a schedule.
+      ScheduleExpression: !Ref AuditScanSchedule
+      State: ENABLED
+      Targets:
+        - Id: AuditCollectorTarget
+          Arn: !GetAtt AuditCollectorFunction.Arn
+
+  AuditCollectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AuditCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AuditCollectorSchedule.Arn
+
+Outputs:
+  AuditCollectorFunctionName:
+    Description: Name of the scheduled audit-evidence collector Lambda
+    Value: !Ref AuditCollectorFunction
+
+  AuditCollectorLogGroupName:
+    Description: Log group for the collector Lambda (also where flagged resource IDs are printed)
+    Value: !Ref AuditCollectorLogGroup
