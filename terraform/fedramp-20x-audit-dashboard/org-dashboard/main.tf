@@ -38,6 +38,19 @@ locals {
     pub_rds          = { namespace = var.network_exposure_namespace, metric_name = "PubliclyAccessibleRdsInstances", stat = "Maximum", id_prefix = "pr", label = "Public RDS" }
     pub_lb           = { namespace = var.network_exposure_namespace, metric_name = "InternetFacingLoadBalancers", stat = "Maximum", id_prefix = "plb", label = "Internet-Facing LBs" }
     pub_s3           = { namespace = var.network_exposure_namespace, metric_name = "PubliclyAccessibleS3Buckets", stat = "Maximum", id_prefix = "ps3", label = "Public S3 Buckets" }
+    rds_not_maz      = { namespace = var.metric_namespace, metric_name = "RdsInstancesNotMultiAz", stat = "Sum", id_prefix = "rma", label = "RDS Instances Not Multi-AZ, Org-Wide (KSI-CNA-OFA)" }
+    asg_single_az    = { namespace = var.metric_namespace, metric_name = "AsgSingleAzCount", stat = "Sum", id_prefix = "asa", label = "Auto Scaling Groups in a Single AZ, Org-Wide (KSI-CNA-OFA)" }
+    remediated       = { namespace = var.metric_namespace, metric_name = "ConfigRulesWithRemediation", stat = "Sum", id_prefix = "crr", label = "Rules With Remediation" }
+    not_remediated   = { namespace = var.metric_namespace, metric_name = "ConfigRulesWithoutRemediation", stat = "Sum", id_prefix = "cnr", label = "Config Rules Without Auto-Remediation, Org-Wide (KSI-CNA-EIS)" }
+    vpc_no_nacl      = { namespace = var.metric_namespace, metric_name = "VpcsWithoutCustomNacl", stat = "Sum", id_prefix = "vnn", label = "VPCs Relying on Default NACL Only, Org-Wide (KSI-CNA-ULN)" }
+    vpc_endpoints    = { namespace = var.metric_namespace, metric_name = "VpcEndpointsCount", stat = "Sum", id_prefix = "vpe", label = "VPC Endpoints" }
+    acm_expiring     = { namespace = var.metric_namespace, metric_name = "AcmCertsExpiringSoon", stat = "Sum", id_prefix = "ace", label = "ACM Certificates Expiring Within 30 Days, Org-Wide (KSI-SVC-VCM)" }
+    s3_insecure      = { namespace = var.metric_namespace, metric_name = "S3BucketsWithoutSecureTransportPolicy", stat = "Sum", id_prefix = "s3i", label = "S3 Buckets Without Secure-Transport Policy" }
+    sechub_score     = { namespace = var.metric_namespace, metric_name = "SecurityHubStandardsScorePercent", stat = "Average", id_prefix = "shs", label = "Security Hub Standards Score, Org-Wide Avg % Passed (KSI-SVC-EIS)" }
+    inspector_crit   = { namespace = var.metric_namespace, metric_name = "Inspector2CriticalFindings", stat = "Sum", id_prefix = "icr", label = "Critical" }
+    inspector_high   = { namespace = var.metric_namespace, metric_name = "Inspector2HighFindings", stat = "Sum", id_prefix = "ihi", label = "High" }
+    ec2_no_profile   = { namespace = var.metric_namespace, metric_name = "Ec2InstancesWithoutInstanceProfile", stat = "Sum", id_prefix = "enp", label = "EC2 Without Instance Profile" }
+    ta_flagged       = { namespace = var.metric_namespace, metric_name = "TrustedAdvisorSecurityChecksFlagged", stat = "Sum", id_prefix = "taf", label = "Trusted Advisor Checks Flagged" }
   }
 
   # Every value here is a ready-to-use `metrics` array: N hidden
@@ -236,6 +249,136 @@ resource "aws_cloudwatch_dashboard" "fedramp_20x_audit_org" {
           view    = "timeSeries"
           region  = data.aws_region.current.name
           metrics = local.metric_groups.external_trust
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.rds_not_maz.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.rds_not_maz
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.asg_single_az.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.asg_single_az
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.not_remediated.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.not_remediated
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.vpc_no_nacl.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.vpc_no_nacl
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.acm_expiring.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.acm_expiring
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.sechub_score.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.sechub_score
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 26
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Config Auto-Remediation Coverage, Org-Wide (KSI-CNA-EIS)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.remediated, local.metric_groups.not_remediated)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 26
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Inspector Findings, Org-Wide (KSI-SCR-MON)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.inspector_crit, local.metric_groups.inspector_high)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 32
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Non-User Auth & Best-Practice Comparison, Org-Wide (KSI-IAM-SNU, KSI-CNA-IBP)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.ec2_no_profile, local.metric_groups.ta_flagged)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 32
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Network Segmentation & Secure Transport, Org-Wide (KSI-CNA-ULN, KSI-SVC-VCM)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.vpc_endpoints, local.metric_groups.s3_insecure)
         }
       },
     ]

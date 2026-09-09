@@ -164,6 +164,71 @@ data "aws_iam_policy_document" "audit_collector_permissions" {
   }
 
   statement {
+    sid    = "ReadHighAvailabilityPosture"
+    effect = "Allow"
+    actions = [
+      "rds:DescribeDBInstances",
+      "autoscaling:DescribeAutoScalingGroups",
+    ]
+    resources = ["*"] # These read-only APIs do not support resource-level permissions
+  }
+
+  statement {
+    sid       = "ReadAutoRemediationCoverage"
+    effect    = "Allow"
+    actions   = ["config:DescribeRemediationConfigurations"]
+    resources = ["*"] # Read-only Config API scoped by rule name at call time, not by ARN
+  }
+
+  statement {
+    sid    = "ReadNetworkSegmentationPosture"
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeVpcEndpoints",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeNetworkAcls",
+      "ec2:DescribeInstances",
+    ]
+    resources = ["*"] # These read-only EC2 APIs do not support resource-level permissions
+  }
+
+  statement {
+    sid    = "ReadSecureCommunicationsPosture"
+    effect = "Allow"
+    actions = [
+      "acm:ListCertificates",
+      "acm:DescribeCertificate",
+      "s3:ListAllMyBuckets",
+      "s3:GetBucketPolicy",
+    ]
+    resources = ["*"] # Read-only checks across a dynamic, account-wide cert/bucket list
+  }
+
+  statement {
+    sid       = "ReadSecurityHubScore"
+    effect    = "Allow"
+    actions   = ["securityhub:GetFindings"]
+    resources = ["*"] # Read-only, account-wide finding query
+  }
+
+  statement {
+    sid       = "ReadInspectorFindings"
+    effect    = "Allow"
+    actions   = ["inspector2:ListFindings"]
+    resources = ["*"] # Read-only, account-wide finding query
+  }
+
+  statement {
+    sid    = "ReadTrustedAdvisorChecks"
+    effect = "Allow"
+    actions = [
+      "support:DescribeTrustedAdvisorChecks",
+      "support:DescribeTrustedAdvisorCheckResult",
+    ]
+    resources = ["*"] # The Support API does not support resource-level permissions
+  }
+
+  statement {
     sid       = "PublishAuditMetrics"
     effect    = "Allow"
     actions   = ["cloudwatch:PutMetricData"]
@@ -215,8 +280,8 @@ resource "aws_lambda_function" "audit_collector" {
   role          = aws_iam_role.audit_collector.arn
   handler       = "fedramp20x_collector.handler"
   runtime       = "python3.12"
-  timeout       = 120
-  memory_size   = 256
+  timeout       = 300
+  memory_size   = 512
 
   filename         = data.archive_file.audit_collector.output_path
   source_code_hash = data.archive_file.audit_collector.output_base64sha256
@@ -462,6 +527,149 @@ resource "aws_cloudwatch_dashboard" "fedramp_20x_audit" {
           metrics = [
             [{ expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)", id = "osg", label = "Open Rules" }],
             [{ expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSensitivePortRules\"', 'Maximum', 86400)", id = "ossp", label = "Open Sensitive-Port Rules" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = "RDS Instances Not Multi-AZ (KSI-CNA-OFA)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "RdsInstancesNotMultiAz", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = "Auto Scaling Groups in a Single AZ (KSI-CNA-OFA)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "AsgSingleAzCount", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = "Config Rules Without Auto-Remediation (KSI-CNA-EIS)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "ConfigRulesWithoutRemediation", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = "VPCs Relying on Default NACL Only (KSI-CNA-ULN)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "VpcsWithoutCustomNacl", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = "ACM Certificates Expiring Within 30 Days (KSI-SVC-VCM)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "AcmCertsExpiringSoon", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 22
+        width  = 4
+        height = 4
+        properties = {
+          title   = "Security Hub Standards Score, % Passed (KSI-SVC-EIS)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "SecurityHubStandardsScorePercent", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 26
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Config Auto-Remediation Coverage (KSI-CNA-EIS)"
+          region = data.aws_region.current.name
+          view   = "timeSeries"
+          metrics = [
+            [var.metric_namespace, "ConfigRulesWithRemediation", { stat = "Maximum", period = 86400, label = "Rules With Remediation" }],
+            [var.metric_namespace, "ConfigRulesWithoutRemediation", { stat = "Maximum", period = 86400, label = "Rules Without Remediation" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 26
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Inspector Findings, Account-Wide (KSI-SCR-MON)"
+          region = data.aws_region.current.name
+          view   = "timeSeries"
+          metrics = [
+            [var.metric_namespace, "Inspector2CriticalFindings", { stat = "Maximum", period = 86400, label = "Critical" }],
+            [var.metric_namespace, "Inspector2HighFindings", { stat = "Maximum", period = 86400, label = "High" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 32
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Network Segmentation & Secure Transport (KSI-CNA-ULN, KSI-SVC-VCM)"
+          region = data.aws_region.current.name
+          view   = "bar"
+          metrics = [
+            [var.metric_namespace, "VpcEndpointsCount", { stat = "Maximum", period = 86400, label = "VPC Endpoints" }],
+            [var.metric_namespace, "S3BucketsWithoutSecureTransportPolicy", { stat = "Maximum", period = 86400, label = "S3 Buckets Without Secure-Transport Policy" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 32
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Non-User Auth & Best-Practice Comparison (KSI-IAM-SNU, KSI-CNA-IBP)"
+          region = data.aws_region.current.name
+          view   = "bar"
+          metrics = [
+            [var.metric_namespace, "Ec2InstancesWithoutInstanceProfile", { stat = "Maximum", period = 86400, label = "EC2 Without Instance Profile" }],
+            [var.metric_namespace, "TrustedAdvisorSecurityChecksFlagged", { stat = "Maximum", period = 86400, label = "Trusted Advisor Checks Flagged" }],
+            [var.metric_namespace, "TrustedAdvisorAvailable", { stat = "Maximum", period = 86400, label = "Trusted Advisor Available (1=yes)" }],
           ]
         }
       },

@@ -13,11 +13,16 @@ It does this two ways:
 
 1. **A new Lambda** (this folder) checks AWS Config recorder/rule
    compliance, CloudTrail health, AWS Backup plan coverage and job outcomes,
-   and IAM Access Analyzer external-access findings — none of which the
-   other six dashboards in this repo already cover.
+   IAM Access Analyzer external-access findings, RDS/ASG availability-zone
+   posture, Config auto-remediation coverage, VPC endpoint/NACL posture,
+   ACM certificate expiry, S3 secure-transport policies, a Security Hub
+   pass/fail score, account-wide Inspector findings (not just EKS/ECR), EC2
+   instance-profile coverage, and Trusted Advisor security-check status
+   where the support plan allows it — 26 metrics across 12 AWS services,
+   none of which the other six dashboards in this repo already cover.
 2. **Reuses the other dashboards' existing metrics.** MFA/stale-credential
    checks, open security groups and public-facing resources, and Security
-   Hub/GuardDuty findings are already collected by
+   Hub/GuardDuty finding *counts* are already collected by
    [`nhi-governance-dashboard`](../nhi-governance-dashboard),
    [`network-exposure-dashboard`](../network-exposure-dashboard), and
    [`security-posture-dashboard`](../security-posture-dashboard). This
@@ -45,17 +50,30 @@ Also required:
 - Permissions to create: KMS key + alias, SQS queue, Lambda function + IAM
   role, EventBridge schedule rule, CloudWatch Logs group, CloudWatch
   dashboard
-- The new collector's role needs read-only access to AWS Config, CloudTrail,
-  AWS Backup, and IAM Access Analyzer (`config:Describe*`,
-  `cloudtrail:DescribeTrails`, `cloudtrail:GetTrailStatus`,
-  `backup:ListBackupPlans`, `backup:ListBackupJobs`,
-  `access-analyzer:ListAnalyzers`, `access-analyzer:ListFindings`) — none of
-  it modifies or deletes anything
+- The collector's role needs read-only access across twelve services —
+  Config (`config:Describe*`), CloudTrail (`cloudtrail:DescribeTrails`,
+  `cloudtrail:GetTrailStatus`), Backup (`backup:List*`), Access Analyzer
+  (`access-analyzer:List*`), RDS (`rds:DescribeDBInstances`), Auto Scaling
+  (`autoscaling:DescribeAutoScalingGroups`), EC2 (`ec2:DescribeVpc*`,
+  `ec2:DescribeNetworkAcls`, `ec2:DescribeInstances`), ACM
+  (`acm:ListCertificates`, `acm:DescribeCertificate`), S3
+  (`s3:ListAllMyBuckets`, `s3:GetBucketPolicy`), Security Hub
+  (`securityhub:GetFindings`), Inspector (`inspector2:ListFindings`), and
+  Support (`support:DescribeTrustedAdvisor*`) — none of it modifies or
+  deletes anything
 - AWS Config, an active CloudTrail, at least one AWS Backup plan, and an
   active IAM Access Analyzer are assumed to *exist* — if any of these
   services isn't enabled in the account, the corresponding metrics report as
   `0`/non-compliant rather than erroring, which is itself useful signal
   (KSI-MLA-EVC and KSI-MLA-OSM specifically expect these to be running)
+- **Trusted Advisor security checks require a Business or Enterprise
+  support plan.** On Basic/Developer support, `TrustedAdvisorAvailable`
+  reports `0` rather than erroring — also useful signal, since an assessor
+  may ask why it's unavailable
+- The Lambda's timeout is 300s/512MB by default — large accounts with many
+  S3 buckets, ACM certificates, or Security Hub findings may need this
+  raised further; the collector logs which check is running so a timeout
+  is easy to attribute to a specific service
 
 No QuickSight license required.
 
@@ -133,6 +151,14 @@ existing metrics.
 | KSI-CNA-RNT | Network traffic is restricted to what's needed | network-exposure-dashboard's Open Security Group Rules metric |
 | KSI-SVC-SIN | Information is encrypted/secured from unwanted access | network-exposure-dashboard's public S3/RDS/LB widgets |
 | KSI-MLA-RVL | Logs are persistently reviewed and audited | security-posture-dashboard's Security Hub/GuardDuty finding-count metrics |
+| KSI-CNA-OFA | Resources are optimized for high availability and rapid recovery | RDS Instances Not Multi-AZ + Auto Scaling Groups in a Single AZ widgets |
+| KSI-CNA-EIS | Non-compliant resources are automatically brought back to their intended state | Config Rules With/Without Auto-Remediation widgets |
+| KSI-CNA-ULN | Logical networking is used and reviewed to enforce traffic flow controls | VPC Endpoints Count + VPCs Relying on Default NACL Only widgets |
+| KSI-SVC-VCM | The authenticity/integrity of communications is validated | ACM Certificates Expiring widget + S3 Buckets Without Secure-Transport Policy widget |
+| KSI-SVC-EIS | Opportunities to improve security are persistently evaluated and made | Security Hub Standards Score (% controls passed) widget |
+| KSI-SCR-MON | Upstream vulnerabilities are persistently monitored | Inspector Findings, Account-Wide widget (Critical/High severity, all resource types — not just EKS/ECR) |
+| KSI-IAM-SNU | Appropriately secure authentication is used for non-user accounts/services | EC2 Instances Without Instance Profile widget |
+| KSI-CNA-IBP | Configuration is persistently compared against provider best-practice guidance | Trusted Advisor Checks Flagged widget (requires Business/Enterprise support — reports unavailable rather than erroring on Basic/Developer plans) |
 
 ### What this dashboard does NOT cover, and why
 
@@ -151,19 +177,23 @@ manufacture a number:
   (incident after-action reports and reviews), **KSI-RPL-ARP/RRO** (recovery
   plan/objective alignment) — process artifacts, typically living in a
   ticketing system or a document, not CloudWatch
-- **KSI-SCR-MIT** (supply chain risk mitigation) — a risk-management
-  process; **KSI-SCR-MON** (upstream vulnerability monitoring) is partially
-  covered if you also deploy `eks-security-dashboard` in this repo, which
-  surfaces Inspector container-image findings
-- **KSI-CNA-EIS/IBP/OFA/ULN**, **KSI-IAM-AAM/SNU**, **KSI-SVC-EIS/PRR/RUD/VCM**
-  — either "Optional" at Class B, or require review of configuration intent
-  against provider best-practice guidance, which is a judgment call this
-  dashboard doesn't attempt to automate
+- **KSI-SCR-MIT** (supply chain risk *mitigation*, as opposed to the
+  *monitoring* half above) — a risk-management process, not a single
+  measurable state
+- **KSI-IAM-AAM** (automated account lifecycle management) — this
+  dashboard's Access Analyzer and stale-role widgets show the *result* of
+  account lifecycle hygiene, but not whether provisioning/deprovisioning
+  itself runs through automation vs. a manual process
+- **KSI-SVC-PRR** (removing residual risk after changes) and **KSI-SVC-RUD**
+  (removing unwanted federal customer data on request) — both "Optional" at
+  Class B, and both describe a workflow outcome tied to a specific change or
+  customer request, not an always-on account state
 
 If your organization also runs EKS, add
 [`eks-security-dashboard`](../eks-security-dashboard) — its cluster/nodegroup
-drift and Inspector findings extend the KSI-SCR-MON and KSI-SVC-ACM coverage
-above for containerized workloads.
+drift and container-image findings complement the account-wide Inspector
+coverage above with EKS-specific signal (Kubernetes version drift, node AMI
+staleness, public-only API endpoints).
 
 ## Known limitations
 
@@ -182,6 +212,22 @@ above for containerized workloads.
 - **AWS Config and CloudTrail must already be enabled** for their widgets to
   mean anything; this dashboard reports their absence as a `0`/non-compliant
   signal rather than trying to enable them for you.
+- **Trusted Advisor coverage requires a Business or Enterprise support
+  plan.** On Basic/Developer plans, `TrustedAdvisorAvailable` reports `0`
+  rather than erroring — that's itself useful signal for an assessor, but
+  it means the widget won't show real data on lower support tiers.
+- **The Security Hub score widget pages through every ACTIVE finding with a
+  PASSED/FAILED compliance status** in the account to compute a percentage.
+  On a large, long-running account this can be a lot of findings — the
+  collector's timeout was raised to 300s/512MB specifically to give this
+  (and the rest of the second-tranche checks) enough headroom, but very
+  large accounts may want to tune that further.
+- **Regional scope.** Like the first-tranche checks, everything in this
+  collector runs against the Lambda's own deployed region only (except
+  Trusted Advisor and S3, which are effectively global) — Config, CloudTrail,
+  Backup, RDS, ASG, EC2, VPC, and ACM findings from other regions won't
+  appear unless you deploy the collector per-region. Multi-region looping
+  (the way `network-exposure-dashboard` does it) is a natural follow-up.
 
 ## Encryption
 
