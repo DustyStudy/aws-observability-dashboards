@@ -51,6 +51,14 @@ locals {
     inspector_high   = { namespace = var.metric_namespace, metric_name = "Inspector2HighFindings", stat = "Sum", id_prefix = "ihi", label = "High" }
     ec2_no_profile   = { namespace = var.metric_namespace, metric_name = "Ec2InstancesWithoutInstanceProfile", stat = "Sum", id_prefix = "enp", label = "EC2 Without Instance Profile" }
     ta_flagged       = { namespace = var.metric_namespace, metric_name = "TrustedAdvisorSecurityChecksFlagged", stat = "Sum", id_prefix = "taf", label = "Trusted Advisor Checks Flagged" }
+    gd_enabled       = { namespace = var.metric_namespace, metric_name = "GuardDutyEnabled", stat = "Sum", id_prefix = "gde", label = "Accounts With GuardDuty Enabled, Org-Wide (KSI-MLA-OSM)" }
+    sh_enabled       = { namespace = var.metric_namespace, metric_name = "SecurityHubEnabled", stat = "Sum", id_prefix = "she", label = "Accounts With Security Hub Enabled, Org-Wide (KSI-MLA-OSM)" }
+    insp_enabled     = { namespace = var.metric_namespace, metric_name = "Inspector2Enabled", stat = "Sum", id_prefix = "ine", label = "Accounts With Inspector Enabled, Org-Wide (KSI-SCR-MON)" }
+    ebs_default      = { namespace = var.metric_namespace, metric_name = "EbsEncryptionByDefaultEnabled", stat = "Sum", id_prefix = "ebd", label = "Accounts With EBS Encryption By Default, Org-Wide (KSI-SVC-SIN)" }
+    rds_unencrypted  = { namespace = var.metric_namespace, metric_name = "RdsInstancesUnencrypted", stat = "Sum", id_prefix = "rdu", label = "RDS Instances Unencrypted, Org-Wide (KSI-SVC-SIN)" }
+    s3_block_public  = { namespace = var.metric_namespace, metric_name = "S3AccountBlockPublicAccessEnabled", stat = "Sum", id_prefix = "s3b", label = "Accounts With S3 Block Public Access Enabled, Org-Wide (KSI-SVC-SIN)" }
+    password_policy  = { namespace = var.metric_namespace, metric_name = "IamPasswordPolicyCompliant", stat = "Sum", id_prefix = "pwp", label = "Accounts With Compliant Password Policy, Org-Wide (KSI-IAM-APM)" }
+    inactive_users   = { namespace = var.nhi_governance_namespace, metric_name = "InactiveIamUsers", stat = "Sum", id_prefix = "iau", label = "Inactive IAM Users, Org-Wide (KSI-IAM-AAM)" }
   }
 
   # Every value here is a ready-to-use `metrics` array: N hidden
@@ -379,6 +387,110 @@ resource "aws_cloudwatch_dashboard" "fedramp_20x_audit_org" {
           view    = "timeSeries"
           region  = data.aws_region.current.name
           metrics = concat(local.metric_groups.vpc_endpoints, local.metric_groups.s3_insecure)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.gd_enabled.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.gd_enabled
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.sh_enabled.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.sh_enabled
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.insp_enabled.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.insp_enabled
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.ebs_default.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.ebs_default
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.rds_unencrypted.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.rds_unencrypted
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.s3_block_public.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.s3_block_public
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 42
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.password_policy.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.password_policy
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 42
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.inactive_users.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.inactive_users
         }
       },
     ]
