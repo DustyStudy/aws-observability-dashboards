@@ -1,20 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   FedRAMP 20x continuous-audit-evidence dashboard, single-account version.
-  A daily Lambda checks AWS Config recorder/rule compliance, CloudTrail
-  health, AWS Backup plan coverage and job outcomes, and IAM Access Analyzer
-  external-access findings, and publishes the results as CloudWatch metrics.
-  The dashboard combines those with metrics already published by this
-  repo's other dashboards (nhi-governance-dashboard, network-exposure-
-  dashboard, security-posture-dashboard) — deploy those first, in the same
-  account, or the widgets that read their namespaces will simply show no
-  data. Every widget title includes the FedRAMP 20x Key Security Indicator
-  (KSI) ID it evidences; see README.md in this folder for the full mapping
-  and for what this dashboard intentionally does NOT cover (KSIs that are
-  procedural/narrative rather than telemetry-based). For an org-wide
-  cross-account rollup, use collector.yaml (deployed via StackSets to every
-  member account) plus org-dashboard.yaml (deployed once in your central
-  monitoring account) instead of this file.
+  A daily Lambda checks AWS Config compliance, CloudTrail health, AWS
+  Backup coverage/outcomes, and IAM Access Analyzer findings, and combines
+  them with metrics already published by this repo's nhi-governance,
+  network-exposure, and security-posture dashboards — deploy those first,
+  in the same account. Every widget title includes the FedRAMP 20x Key
+  Security Indicator (KSI) ID it evidences; see README.md for the full
+  mapping and for what this dashboard intentionally does not cover. For an
+  org-wide cross-account rollup, use collector.yaml plus org-dashboard.yaml
+  instead of this file.
 
 Parameters:
   NamePrefix:
@@ -555,8 +550,8 @@ Resources:
                 "title": "Open Security Group Rules by Region (KSI-CNA-RNT)",
                 "region": "${AWS::Region}", "view": "bar",
                 "metrics": [
-                  [ { "expression": "SEARCH('{${NetworkExposureNamespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)", "id": "osg", "label": "$${PROP('Dim.Region')} - Open Rules" } ],
-                  [ { "expression": "SEARCH('{${NetworkExposureNamespace},Region} MetricName=\"OpenSensitivePortRules\"', 'Maximum', 86400)", "id": "ossp", "label": "$${PROP('Dim.Region')} - Open Sensitive-Port Rules" } ]
+                  [ { "expression": "SEARCH('{${NetworkExposureNamespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)", "id": "osg", "label": "Open Rules" } ],
+                  [ { "expression": "SEARCH('{${NetworkExposureNamespace},Region} MetricName=\"OpenSensitivePortRules\"', 'Maximum', 86400)", "id": "ossp", "label": "Open Sensitive-Port Rules" } ]
                 ]
               }
             }

@@ -460,8 +460,8 @@ resource "aws_cloudwatch_dashboard" "fedramp_20x_audit" {
           region = data.aws_region.current.name
           view   = "bar"
           metrics = [
-            [{ expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)", id = "osg", label = "$${PROP('Dim.Region')} - Open Rules" }],
-            [{ expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSensitivePortRules\"', 'Maximum', 86400)", id = "ossp", label = "$${PROP('Dim.Region')} - Open Sensitive-Port Rules" }],
+            [{ expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)", id = "osg", label = "Open Rules" }],
+            [{ expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSensitivePortRules\"', 'Maximum', 86400)", id = "ossp", label = "Open Sensitive-Port Rules" }],
           ]
         }
       },

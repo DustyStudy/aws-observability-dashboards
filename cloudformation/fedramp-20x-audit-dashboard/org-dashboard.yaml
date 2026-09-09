@@ -1,25 +1,21 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Org-wide FedRAMP 20x continuous-audit-evidence dashboard. Deploy this
-  ONCE, in your central monitoring account (the one holding the OAM sink —
-  see ../../org-observability/oam-sink), after every member account has
-  both an OAM Link (../../org-observability/oam-link) and this dashboard's
-  collector (collector.yaml in this folder) deployed via StackSets — as
-  well as the collectors for nhi-governance-dashboard, network-exposure-
-  dashboard, and security-posture-dashboard, whose metrics this dashboard
-  also reads. This template contains no scanning logic of its own — it
-  only builds a cross-account CloudWatch dashboard from metrics every
-  linked account's collectors already publish locally. Every widget title
-  carries its FedRAMP 20x Key Security Indicator (KSI) ID; see README.md
-  for the full mapping.
+  ONCE, in your central monitoring account (the OAM sink — see
+  ../../org-observability/oam-sink), after every member account has an OAM
+  Link plus this folder's collector.yaml, as well as the collectors for
+  nhi-governance-dashboard, network-exposure-dashboard, and
+  security-posture-dashboard, whose metrics this dashboard also reads.
+  This template has no scanning logic of its own — it builds a
+  cross-account CloudWatch dashboard from metrics every linked account's
+  collectors already publish locally. Every widget title carries its
+  FedRAMP 20x KSI ID; see README.md for the full mapping.
 
-  CloudFormation's native intrinsic functions can't loop-generate JSON
-  content inside a DashboardBody string, so this uses a small Lambda-backed
-  custom resource to render the dashboard from a list of member account IDs
-  at deploy time, the same approach nhi-governance-dashboard's
-  org-dashboard.yaml uses. The Terraform version of this same dashboard
-  (org-dashboard/main.tf) does this natively with a `for` expression — no
-  custom resource needed there.
+  CloudFormation can't loop-generate DashboardBody JSON natively, so this
+  uses a small Lambda-backed custom resource to render the dashboard from a
+  list of member account IDs at deploy time, same as
+  nhi-governance-dashboard's org-dashboard.yaml. The Terraform version
+  (org-dashboard/main.tf) does this natively with a `for` expression.
 
 Parameters:
   DashboardName:
