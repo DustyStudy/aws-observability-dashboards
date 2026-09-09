@@ -16,6 +16,7 @@ LAMBDA_DIRS = [
     "terraform/nhi-governance-dashboard/lambda",
     "terraform/ai-service-inventory-dashboard/lambda",
     "terraform/eks-security-dashboard/lambda",
+    "terraform/fedramp-20x-audit-dashboard/lambda",
 ]
 
 for rel_dir in LAMBDA_DIRS:

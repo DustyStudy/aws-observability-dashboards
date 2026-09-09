@@ -1,0 +1,243 @@
+terraform {
+  required_version = ">= 1.5.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0"
+    }
+  }
+}
+
+data "aws_region" "current" {}
+
+# -----------------------------------------------------------------------
+# Same "hidden per-account entry + one visible SUM() expression" recipe
+# used by every org-dashboard module in this repo (see
+# ../../nhi-governance-dashboard/org-dashboard/main.tf for the original).
+# This dashboard reads four different namespaces (this module's own audit
+# metrics, plus nhi-governance, network-exposure, and security-posture's),
+# so each spec carries its own `namespace` instead of a single shared one.
+# -----------------------------------------------------------------------
+locals {
+  metric_specs = {
+    non_compliant    = { namespace = var.metric_namespace, metric_name = "ConfigRulesNonCompliant", stat = "Maximum", id_prefix = "cnc", label = "Config Rules Non-Compliant (KSI-MLA-EVC, KSI-SVC-ACM)" }
+    compliant        = { namespace = var.metric_namespace, metric_name = "ConfigRulesCompliant", stat = "Maximum", id_prefix = "cc", label = "Compliant Rules" }
+    ct_logging       = { namespace = var.metric_namespace, metric_name = "CloudTrailLoggingActive", stat = "Sum", id_prefix = "ctl", label = "Accounts With CloudTrail Logging Active (KSI-MLA-OSM, KSI-MLA-LET)" }
+    backup_failed    = { namespace = var.metric_namespace, metric_name = "BackupJobsFailed24h", stat = "Sum", id_prefix = "bjf", label = "Jobs Failed (24h)" }
+    backup_succeeded = { namespace = var.metric_namespace, metric_name = "BackupJobsSucceeded24h", stat = "Sum", id_prefix = "bjs", label = "Jobs Succeeded (24h)" }
+    backup_plans     = { namespace = var.metric_namespace, metric_name = "BackupPlansCount", stat = "Maximum", id_prefix = "bpc", label = "Backup Plans" }
+    aa_findings      = { namespace = var.metric_namespace, metric_name = "AccessAnalyzerExternalAccessFindings", stat = "Maximum", id_prefix = "aaf", label = "Access Analyzer External-Access Findings (KSI-IAM-SUS)" }
+    no_mfa           = { namespace = var.nhi_governance_namespace, metric_name = "UsersWithoutMfa", stat = "Maximum", id_prefix = "mfa", label = "Users Without MFA, Org-Wide (KSI-IAM-APM)" }
+    stale_roles      = { namespace = var.nhi_governance_namespace, metric_name = "StaleIamRoles", stat = "Maximum", id_prefix = "sr", label = "Stale IAM Roles, Org-Wide (KSI-IAM-ELP)" }
+    external_trust   = { namespace = var.nhi_governance_namespace, metric_name = "ExternalTrustRoles", stat = "Maximum", id_prefix = "et", label = "External-Trust Roles" }
+    sechub_critical  = { namespace = var.security_observability_namespace, metric_name = "SecurityHubCriticalFindings", stat = "Sum", id_prefix = "shc", label = "Security Hub Critical" }
+    sechub_high      = { namespace = var.security_observability_namespace, metric_name = "SecurityHubHighFindings", stat = "Sum", id_prefix = "shh", label = "Security Hub High" }
+    gd_high          = { namespace = var.security_observability_namespace, metric_name = "GuardDutyHighSeverityFindings", stat = "Sum", id_prefix = "gdh", label = "GuardDuty High Severity" }
+    pub_ec2          = { namespace = var.network_exposure_namespace, metric_name = "PublicEc2Instances", stat = "Maximum", id_prefix = "pe", label = "Public EC2" }
+    pub_rds          = { namespace = var.network_exposure_namespace, metric_name = "PubliclyAccessibleRdsInstances", stat = "Maximum", id_prefix = "pr", label = "Public RDS" }
+    pub_lb           = { namespace = var.network_exposure_namespace, metric_name = "InternetFacingLoadBalancers", stat = "Maximum", id_prefix = "plb", label = "Internet-Facing LBs" }
+    pub_s3           = { namespace = var.network_exposure_namespace, metric_name = "PubliclyAccessibleS3Buckets", stat = "Maximum", id_prefix = "ps3", label = "Public S3 Buckets" }
+  }
+
+  # Every value here is a ready-to-use `metrics` array: N hidden
+  # per-account entries + 1 visible SUM() expression summing all of them.
+  metric_group_accounts = {
+    for key, spec in local.metric_specs : key => [
+      for i, acct in var.member_account_ids : [
+        spec.namespace, spec.metric_name,
+        { stat = spec.stat, period = 86400, accountId = acct, id = "${spec.id_prefix}${i}", visible = false }
+      ]
+    ]
+  }
+
+  metric_group_totals = {
+    for key, spec in local.metric_specs : key => [[{
+      expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
+      label      = spec.label
+      id         = "total_${spec.id_prefix}"
+    }]]
+  }
+
+  metric_groups = {
+    for key, spec in local.metric_specs : key => concat(local.metric_group_accounts[key], local.metric_group_totals[key])
+  }
+
+  # OpenSecurityGroupRules is dimensioned by Region within each account, so
+  # this one stays as one SEARCH expression per account instead of
+  # collapsing to a single org-wide sum — same approach
+  # nhi-governance-dashboard's org-dashboard uses for SecretsWithoutRotation.
+  open_sg_by_account_region_metrics = [
+    for i, acct in var.member_account_ids : [{
+      expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\\\"OpenSecurityGroupRules\\\"', 'Maximum', 86400)"
+      id         = "osg${i}"
+      accountId  = acct
+      label      = "${acct} - $${PROP('Dim.Region')}"
+    }]
+  ]
+}
+
+resource "aws_cloudwatch_dashboard" "fedramp_20x_audit_org" {
+  dashboard_name = var.dashboard_name
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.non_compliant.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.non_compliant
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 0
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.ct_logging.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.ct_logging
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 0
+        width  = 4
+        height = 4
+        properties = {
+          title   = "Backup Jobs Failed, Last 24h (KSI-RPL-TRC)"
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.backup_failed
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 0
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.aa_findings.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.aa_findings
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 0
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.no_mfa.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.no_mfa
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 0
+        width  = 4
+        height = 4
+        properties = {
+          title   = local.metric_specs.stale_roles.label
+          view    = "singleValue"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.stale_roles
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 4
+        width  = 12
+        height = 6
+        properties = {
+          title   = "AWS Config Rule Compliance, Org-Wide (KSI-MLA-EVC, KSI-SVC-ACM)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.compliant, local.metric_groups.non_compliant)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 4
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Backup Coverage & Job Outcomes, Org-Wide (KSI-RPL-ABO, KSI-RPL-TRC)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.backup_plans, local.metric_groups.backup_succeeded, local.metric_groups.backup_failed)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 10
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Security Hub / GuardDuty High-Severity Findings, Org-Wide (KSI-MLA-RVL, KSI-IAM-SUS)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.sechub_critical, local.metric_groups.sechub_high, local.metric_groups.gd_high)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 10
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Public-Facing Resources, Org-Wide (KSI-CNA-MAT, KSI-SVC-SIN)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = concat(local.metric_groups.pub_ec2, local.metric_groups.pub_rds, local.metric_groups.pub_lb, local.metric_groups.pub_s3)
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 16
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Open Security Group Rules by Account/Region (KSI-CNA-RNT)"
+          view    = "bar"
+          region  = data.aws_region.current.name
+          metrics = local.open_sg_by_account_region_metrics
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 16
+        width  = 12
+        height = 6
+        properties = {
+          title   = "External-Trust IAM Roles, Org-Wide (KSI-IAM-JIT)"
+          view    = "timeSeries"
+          region  = data.aws_region.current.name
+          metrics = local.metric_groups.external_trust
+        }
+      },
+    ]
+  })
+}

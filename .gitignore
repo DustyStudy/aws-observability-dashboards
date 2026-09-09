@@ -15,4 +15,6 @@ override.tf.json
 # General
 .DS_Store
 *.zip
+__pycache__/
+*.pyc
 

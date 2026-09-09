@@ -42,21 +42,23 @@ Each dashboard folder is self-contained and deployable on its own.
 | [network-exposure-dashboard](cloudformation/network-exposure-dashboard) | ✅ Built | Collector only | Internet-open security groups, public EC2/RDS/load balancers, exposed S3 buckets by region, plus optional VPC Flow Log rejected-connection trends and port-scan detection |
 | [nhi-governance-dashboard](cloudformation/nhi-governance-dashboard) | ✅ Built | ✅ Full | Non-human identity risk: stale/unrotated access keys, users without MFA, inactive IAM users, stale IAM roles, external-trust roles, workload identity federation footprint, Secrets Manager rotation status |
 | [eks-security-dashboard](cloudformation/eks-security-dashboard) | ✅ Built | Collector only | EKS cluster/nodegroup Kubernetes version drift, stale node AMIs, nodegroup health issues, public-only API endpoints, GuardDuty EKS Protection findings, Inspector container image vulnerabilities |
+| [fedramp-20x-audit-dashboard](cloudformation/fedramp-20x-audit-dashboard) | ✅ Built | ✅ Full | Continuous audit evidence for FedRAMP 20x Key Security Indicators (KSIs): AWS Config compliance, CloudTrail health, AWS Backup coverage/outcomes, IAM Access Analyzer findings, plus widgets pulling in this repo's other dashboards — every widget titled with the specific KSI ID it evidences |
 
-"Org-wide" refers to the multi-account setup described below: two
-dashboards (`nhi-governance`, `agentic-ai-guardrails`) have a complete
-central-account version today; the other five have their per-account
-collector half already split out and ready under
+"Org-wide" refers to the multi-account setup described below: three
+dashboards (`nhi-governance`, `agentic-ai-guardrails`, `fedramp-20x-audit`)
+have a complete central-account version today; the other five have their
+per-account collector half already split out and ready under
 [`org-observability/`](org-observability/README.md), with the
 org-dashboard side documented but not yet built for each.
 
 All five dashboards from the original roadmap are built, plus a sixth
-(nhi-governance) for non-human identity and a seventh (eks-security) for
-Kubernetes/container security — both added because they're where a lot of
-current enterprise cloud security attention is going. Ideas for further
-dashboards: CloudFront/API Gateway exposure, EFS/FSx public mounts,
-SageMaker endpoint cost and utilization, or cross-account rollups of any
-dashboard here via StackSets — see each dashboard's own README for its
+(nhi-governance) for non-human identity, a seventh (eks-security) for
+Kubernetes/container security, and an eighth (fedramp-20x-audit) mapping
+directly to FedRAMP 20x Key Security Indicators — added because they're
+where a lot of current enterprise cloud security attention is going. Ideas
+for further dashboards: CloudFront/API Gateway exposure, EFS/FSx public
+mounts, SageMaker endpoint cost and utilization, or cross-account rollups of
+any dashboard here via StackSets — see each dashboard's own README for its
 specific "Extending" notes.
 
 ## How each dashboard is wired
