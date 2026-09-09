@@ -229,6 +229,42 @@ data "aws_iam_policy_document" "audit_collector_permissions" {
   }
 
   statement {
+    sid    = "ReadDetectorStatus"
+    effect = "Allow"
+    actions = [
+      "guardduty:ListDetectors",
+      "guardduty:GetDetector",
+      "securityhub:DescribeHub",
+      "inspector2:BatchGetAccountStatus",
+    ]
+    resources = ["*"] # Read-only status checks; none of these support resource-level permissions
+  }
+
+  statement {
+    sid    = "ReadAccountEncryptionDefaults"
+    effect = "Allow"
+    actions = [
+      "ec2:GetEbsEncryptionByDefault",
+      "s3:GetAccountPublicAccessBlock",
+    ]
+    resources = ["*"] # Account-level settings, not per-resource
+  }
+
+  statement {
+    sid       = "ReadPasswordPolicy"
+    effect    = "Allow"
+    actions   = ["iam:GetAccountPasswordPolicy"]
+    resources = ["*"] # Account-level setting, not per-resource
+  }
+
+  statement {
+    sid       = "ReadOwnAccountId"
+    effect    = "Allow"
+    actions   = ["sts:GetCallerIdentity"]
+    resources = ["*"] # Required to scope the S3 account-level Block Public Access call
+  }
+
+  statement {
     sid       = "PublishAuditMetrics"
     effect    = "Allow"
     actions   = ["cloudwatch:PutMetricData"]
@@ -671,6 +707,101 @@ resource "aws_cloudwatch_dashboard" "fedramp_20x_audit" {
             [var.metric_namespace, "TrustedAdvisorSecurityChecksFlagged", { stat = "Maximum", period = 86400, label = "Trusted Advisor Checks Flagged" }],
             [var.metric_namespace, "TrustedAdvisorAvailable", { stat = "Maximum", period = 86400, label = "Trusted Advisor Available (1=yes)" }],
           ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title  = "GuardDuty + Security Hub Detectors Running (KSI-MLA-OSM)"
+          region = data.aws_region.current.name
+          view   = "singleValue"
+          metrics = [
+            [{ expression = "MIN([gd,sh])", label = "Both Running (1=yes)", id = "detrun" }],
+            [var.metric_namespace, "GuardDutyEnabled", { stat = "Maximum", period = 86400, id = "gd", visible = false }],
+            [var.metric_namespace, "SecurityHubEnabled", { stat = "Maximum", period = 86400, id = "sh", visible = false }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = "Inspector Scanning Enabled (KSI-SCR-MON)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "Inspector2Enabled", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = "EBS Encryption By Default (KSI-SVC-SIN)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "EbsEncryptionByDefaultEnabled", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = "RDS Instances Unencrypted (KSI-SVC-SIN)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "RdsInstancesUnencrypted", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = "S3 Account Block Public Access Enabled (KSI-SVC-SIN)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "S3AccountBlockPublicAccessEnabled", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 38
+        width  = 4
+        height = 4
+        properties = {
+          title   = "IAM Password Policy Compliant (KSI-IAM-APM)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.metric_namespace, "IamPasswordPolicyCompliant", { stat = "Maximum", period = 86400 }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 42
+        width  = 4
+        height = 4
+        properties = {
+          title   = "Inactive IAM Users (KSI-IAM-AAM)"
+          region  = data.aws_region.current.name
+          view    = "singleValue"
+          metrics = [[var.nhi_governance_namespace, "InactiveIamUsers", { stat = "Maximum", period = 86400 }]]
         }
       },
     ]

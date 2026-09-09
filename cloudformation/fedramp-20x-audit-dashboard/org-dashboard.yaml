@@ -324,6 +324,14 @@ Resources:
                   _trend_widget(12, 32, 12, 6, "Network Segmentation & Secure Transport, Org-Wide (KSI-CNA-ULN, KSI-SVC-VCM)", ns,
                                 [("VpcEndpointsCount", "VPC Endpoints", "Sum"),
                                  ("S3BucketsWithoutSecureTransportPolicy", "S3 Buckets Without Secure-Transport Policy", "Sum")], account_ids, region),
+                  _single_value_widget(0, 38, 4, 4, "Accounts With GuardDuty Enabled, Org-Wide (KSI-MLA-OSM)", ns, "GuardDutyEnabled", account_ids, region, stat="Sum"),
+                  _single_value_widget(4, 38, 4, 4, "Accounts With Security Hub Enabled, Org-Wide (KSI-MLA-OSM)", ns, "SecurityHubEnabled", account_ids, region, stat="Sum"),
+                  _single_value_widget(8, 38, 4, 4, "Accounts With Inspector Enabled, Org-Wide (KSI-SCR-MON)", ns, "Inspector2Enabled", account_ids, region, stat="Sum"),
+                  _single_value_widget(12, 38, 4, 4, "Accounts With EBS Encryption By Default, Org-Wide (KSI-SVC-SIN)", ns, "EbsEncryptionByDefaultEnabled", account_ids, region, stat="Sum"),
+                  _single_value_widget(16, 38, 4, 4, "RDS Instances Unencrypted, Org-Wide (KSI-SVC-SIN)", ns, "RdsInstancesUnencrypted", account_ids, region, stat="Sum"),
+                  _single_value_widget(20, 38, 4, 4, "Accounts With S3 Block Public Access Enabled, Org-Wide (KSI-SVC-SIN)", ns, "S3AccountBlockPublicAccessEnabled", account_ids, region, stat="Sum"),
+                  _single_value_widget(0, 42, 4, 4, "Accounts With Compliant Password Policy, Org-Wide (KSI-IAM-APM)", ns, "IamPasswordPolicyCompliant", account_ids, region, stat="Sum"),
+                  _single_value_widget(4, 42, 4, 4, "Inactive IAM Users, Org-Wide (KSI-IAM-AAM)", nhi, "InactiveIamUsers", account_ids, region, stat="Sum"),
               ]
               return {"widgets": widgets}
 

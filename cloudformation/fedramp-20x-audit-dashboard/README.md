@@ -50,17 +50,20 @@ Also required:
 - Permissions to create: KMS key + alias, SQS queue, Lambda function + IAM
   role, EventBridge schedule rule, CloudWatch Logs group, CloudWatch
   dashboard
-- The collector's role needs read-only access across twelve services —
+- The collector's role needs read-only access across sixteen services —
   Config (`config:Describe*`), CloudTrail (`cloudtrail:DescribeTrails`,
   `cloudtrail:GetTrailStatus`), Backup (`backup:List*`), Access Analyzer
   (`access-analyzer:List*`), RDS (`rds:DescribeDBInstances`), Auto Scaling
   (`autoscaling:DescribeAutoScalingGroups`), EC2 (`ec2:DescribeVpc*`,
-  `ec2:DescribeNetworkAcls`, `ec2:DescribeInstances`), ACM
-  (`acm:ListCertificates`, `acm:DescribeCertificate`), S3
-  (`s3:ListAllMyBuckets`, `s3:GetBucketPolicy`), Security Hub
-  (`securityhub:GetFindings`), Inspector (`inspector2:ListFindings`), and
-  Support (`support:DescribeTrustedAdvisor*`) — none of it modifies or
-  deletes anything
+  `ec2:DescribeNetworkAcls`, `ec2:DescribeInstances`,
+  `ec2:GetEbsEncryptionByDefault`), ACM (`acm:ListCertificates`,
+  `acm:DescribeCertificate`), S3 (`s3:ListAllMyBuckets`,
+  `s3:GetBucketPolicy`, `s3:GetAccountPublicAccessBlock`), Security Hub
+  (`securityhub:GetFindings`, `securityhub:DescribeHub`), Inspector
+  (`inspector2:ListFindings`, `inspector2:BatchGetAccountStatus`), Support
+  (`support:DescribeTrustedAdvisor*`), GuardDuty (`guardduty:ListDetectors`,
+  `guardduty:GetDetector`), IAM (`iam:GetAccountPasswordPolicy`), and STS
+  (`sts:GetCallerIdentity`) — none of it modifies or deletes anything
 - AWS Config, an active CloudTrail, at least one AWS Backup plan, and an
   active IAM Access Analyzer are assumed to *exist* — if any of these
   services isn't enabled in the account, the corresponding metrics report as
@@ -159,6 +162,11 @@ existing metrics.
 | KSI-SCR-MON | Upstream vulnerabilities are persistently monitored | Inspector Findings, Account-Wide widget (Critical/High severity, all resource types — not just EKS/ECR) |
 | KSI-IAM-SNU | Appropriately secure authentication is used for non-user accounts/services | EC2 Instances Without Instance Profile widget |
 | KSI-CNA-IBP | Configuration is persistently compared against provider best-practice guidance | Trusted Advisor Checks Flagged widget (requires Business/Enterprise support — reports unavailable rather than erroring on Basic/Developer plans) |
+| KSI-MLA-OSM (detector status) | The SIEM/detection capability is actually operating, not just quiet | GuardDuty + Security Hub Detectors Running widget — a finding count of zero looks identical whether an account is clean or the detector was never turned on; this closes that gap |
+| KSI-SCR-MON (detector status) | Upstream vulnerability scanning is actually enabled | Inspector Scanning Enabled widget, alongside the Inspector Findings widget from the second tranche |
+| KSI-SVC-SIN (account defaults) | Information is encrypted/secured by default, account-wide | EBS Encryption By Default, RDS Instances Unencrypted, and S3 Account Block Public Access Enabled widgets |
+| KSI-IAM-APM (password policy) | Strong authentication requirements are enforced | IAM Password Policy Compliant widget (length ≥14, complexity, ≤90-day rotation, 24-generation reuse prevention) |
+| KSI-IAM-AAM (partial) | Non-user/service account lifecycle is automated and reviewed | Inactive IAM Users widget — reuses nhi-governance-dashboard's existing metric. This shows whether stale users are accumulating, which is evidence the *review* half is happening; it doesn't prove deprovisioning itself runs through automation vs. a manual process, see below |
 
 ### What this dashboard does NOT cover, and why
 
@@ -180,10 +188,10 @@ manufacture a number:
 - **KSI-SCR-MIT** (supply chain risk *mitigation*, as opposed to the
   *monitoring* half above) — a risk-management process, not a single
   measurable state
-- **KSI-IAM-AAM** (automated account lifecycle management) — this
-  dashboard's Access Analyzer and stale-role widgets show the *result* of
-  account lifecycle hygiene, but not whether provisioning/deprovisioning
-  itself runs through automation vs. a manual process
+- **KSI-IAM-AAM, the automation half** — the Inactive IAM Users widget
+  (see table above) shows the *result* of account lifecycle hygiene, but
+  not whether provisioning/deprovisioning itself runs through automation
+  vs. a manual process
 - **KSI-SVC-PRR** (removing residual risk after changes) and **KSI-SVC-RUD**
   (removing unwanted federal customer data on request) — both "Optional" at
   Class B, and both describe a workflow outcome tied to a specific change or
@@ -222,12 +230,21 @@ staleness, public-only API endpoints).
   collector's timeout was raised to 300s/512MB specifically to give this
   (and the rest of the second-tranche checks) enough headroom, but very
   large accounts may want to tune that further.
-- **Regional scope.** Like the first-tranche checks, everything in this
-  collector runs against the Lambda's own deployed region only (except
-  Trusted Advisor and S3, which are effectively global) — Config, CloudTrail,
-  Backup, RDS, ASG, EC2, VPC, and ACM findings from other regions won't
-  appear unless you deploy the collector per-region. Multi-region looping
-  (the way `network-exposure-dashboard` does it) is a natural follow-up.
+- **Regional scope.** Like the first- and second-tranche checks, GuardDuty,
+  Security Hub, Inspector2, RDS, and EBS encryption-default status are
+  checked in the Lambda's own deployed region only — a detector enabled in
+  one region but not another won't be caught unless you deploy the
+  collector per-region. IAM password policy and S3 account-level Block
+  Public Access are genuinely account-wide (not regional), so those two are
+  unaffected by this limitation.
+- **The S3 account-level Block Public Access check needs the account's own
+  ID**, resolved via one `sts:GetCallerIdentity` call per run. If that call
+  fails for any reason, only that one check is skipped for the run — every
+  other metric still publishes normally.
+- **The detector-status checks report on/off, not health.** A GuardDuty
+  detector that's enabled but hasn't ingested a CloudTrail event in months
+  still reports `GuardDutyEnabled=1` — this check catches "never turned on"
+  and "explicitly suspended," not silent data-source failures.
 
 ## Encryption
 

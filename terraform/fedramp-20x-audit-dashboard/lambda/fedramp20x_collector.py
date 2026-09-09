@@ -16,12 +16,19 @@ METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "FedRAMP20xAudit")
 # expiry and S3 secure-transport policies, a Security Hub standards score,
 # account-wide Inspector findings (not just EKS), EC2 instances missing an
 # IAM instance profile, and Trusted Advisor security-check status where the
-# support plan allows it. It does NOT duplicate MFA/stale-key checks
-# (already in nhi-governance-dashboard), open-security-group/public-resource
-# checks (already in network-exposure-dashboard), or Security Hub/GuardDuty
-# finding *counts* (already in security-posture-dashboard) — the Security
-# Hub check here is a different thing, a pass/fail *score* across enabled
-# standards. See README.md in this folder for the full KSI-to-metric mapping
+# support plan allows it. Third tranche: whether GuardDuty/Security Hub/
+# Inspector are actually turned ON (a finding *count* of zero looks
+# identical whether an account is clean or the detector was never enabled —
+# this closes that blind spot), account-level EBS encryption-by-default,
+# RDS storage encryption, S3 account-level Block Public Access, and IAM
+# account password policy strength. It does NOT duplicate MFA/stale-key
+# checks (already in nhi-governance-dashboard), open-security-group/
+# public-resource checks (already in network-exposure-dashboard), or
+# Security Hub/GuardDuty finding *counts* (already in
+# security-posture-dashboard) — the Security Hub check here is a different
+# thing, a pass/fail *score* across enabled standards, and the detector
+# checks here are about whether the service is running at all, not what it
+# found. See README.md in this folder for the full KSI-to-metric mapping
 # across all eight dashboards.
 
 
@@ -361,6 +368,120 @@ def _check_trusted_advisor(support, findings):
     return metrics
 
 
+def _check_detector_status(guardduty, securityhub, inspector2, findings):
+    """Is the detection tooling itself actually running, not just what it found.
+
+    A finding count of zero looks identical whether the account is clean or
+    the detector was never turned on -- this check exists specifically to
+    close that blind spot for GuardDuty, Security Hub, and Inspector2.
+    """
+    metrics = {"GuardDutyEnabled": 0, "SecurityHubEnabled": 0, "Inspector2Enabled": 0}
+
+    try:
+        detector_ids = guardduty.list_detectors().get("DetectorIds", [])
+        if not detector_ids:
+            findings.append("GUARDDUTY_NOT_ENABLED")
+        else:
+            detail = guardduty.get_detector(DetectorId=detector_ids[0])
+            if detail.get("Status") == "ENABLED":
+                metrics["GuardDutyEnabled"] = 1
+            else:
+                findings.append("GUARDDUTY_DETECTOR_SUSPENDED")
+    except ClientError as exc:
+        print(f"GuardDuty detector-status check failed: {exc}")
+        findings.append("GUARDDUTY_NOT_ENABLED")
+
+    try:
+        securityhub.describe_hub()
+        metrics["SecurityHubEnabled"] = 1
+    except ClientError as exc:
+        print(f"Security Hub not enabled: {exc}")
+        findings.append("SECURITY_HUB_NOT_ENABLED")
+
+    try:
+        status = inspector2.batch_get_account_status().get("accounts", [])
+        resource_state = status[0].get("resourceState", {}) if status else {}
+        if any(rs.get("status") == "ENABLED" for rs in resource_state.values()):
+            metrics["Inspector2Enabled"] = 1
+        else:
+            findings.append("INSPECTOR2_NOT_ENABLED")
+    except ClientError as exc:
+        print(f"Inspector2 account-status check failed: {exc}")
+        findings.append("INSPECTOR2_NOT_ENABLED")
+
+    return metrics
+
+
+def _check_account_encryption_defaults(ec2, rds, s3control, account_id, findings):
+    """KSI-SVC-SIN, account-wide defaults: EBS/RDS encryption and S3 public-access blocking."""
+    metrics = {
+        "EbsEncryptionByDefaultEnabled": 0,
+        "RdsInstancesUnencrypted": 0,
+        "S3AccountBlockPublicAccessEnabled": 0,
+    }
+
+    try:
+        if ec2.get_ebs_encryption_by_default().get("EbsEncryptionByDefault"):
+            metrics["EbsEncryptionByDefaultEnabled"] = 1
+        else:
+            findings.append("EBS_ENCRYPTION_BY_DEFAULT_DISABLED")
+    except ClientError as exc:
+        print(f"EBS encryption-by-default check failed: {exc}")
+
+    try:
+        paginator = rds.get_paginator("describe_db_instances")
+        for page in paginator.paginate():
+            for db in page.get("DBInstances", []):
+                if not db.get("StorageEncrypted", False):
+                    metrics["RdsInstancesUnencrypted"] += 1
+                    findings.append(f"RDS_STORAGE_UNENCRYPTED instance={db.get('DBInstanceIdentifier')}")
+    except ClientError as exc:
+        print(f"RDS storage-encryption check failed: {exc}")
+
+    try:
+        config = s3control.get_public_access_block(AccountId=account_id).get(
+            "PublicAccessBlockConfiguration", {}
+        )
+        if all(
+            config.get(key, False)
+            for key in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")
+        ):
+            metrics["S3AccountBlockPublicAccessEnabled"] = 1
+        else:
+            findings.append("S3_ACCOUNT_BLOCK_PUBLIC_ACCESS_PARTIAL")
+    except ClientError as exc:
+        # NoSuchPublicAccessBlockConfiguration means it was never configured at all.
+        print(f"S3 account-level Block Public Access check failed: {exc}")
+        findings.append("S3_ACCOUNT_BLOCK_PUBLIC_ACCESS_NOT_CONFIGURED")
+
+    return metrics
+
+
+def _check_password_policy(iam, findings):
+    """KSI-IAM-APM: is a strong IAM account password policy enforced."""
+    metrics = {"IamPasswordPolicyCompliant": 0}
+    try:
+        policy = iam.get_account_password_policy().get("PasswordPolicy", {})
+        compliant = (
+            policy.get("MinimumPasswordLength", 0) >= 14
+            and policy.get("RequireSymbols", False)
+            and policy.get("RequireNumbers", False)
+            and policy.get("RequireUppercaseCharacters", False)
+            and policy.get("RequireLowercaseCharacters", False)
+            and (policy.get("MaxPasswordAge") or 9999) <= 90
+            and (policy.get("PasswordReusePrevention") or 0) >= 24
+        )
+        if compliant:
+            metrics["IamPasswordPolicyCompliant"] = 1
+        else:
+            findings.append("IAM_PASSWORD_POLICY_WEAK")
+    except ClientError as exc:
+        print(f"IAM password policy check failed: {exc}")
+        findings.append("NO_IAM_PASSWORD_POLICY")
+
+    return metrics
+
+
 def chunked(items, size):
     for i in range(0, len(items), size):
         yield items[i:i + size]
@@ -384,6 +505,10 @@ def handler(event, context):
     # The Support API only has an endpoint in us-east-1, regardless of
     # which region this Lambda itself runs in.
     support = boto3.client("support", region_name="us-east-1")
+    guardduty = boto3.client("guardduty")
+    s3control = boto3.client("s3control")
+    iam = boto3.client("iam")
+    sts = boto3.client("sts")
 
     metrics = {}
     metrics.update(_check_config(config, findings, non_compliant_rule_names))
@@ -398,6 +523,14 @@ def handler(event, context):
     metrics.update(_check_inspector_findings(inspector2, findings))
     metrics.update(_check_non_user_auth(ec2, findings))
     metrics.update(_check_trusted_advisor(support, findings))
+    metrics.update(_check_detector_status(guardduty, securityhub, inspector2, findings))
+    metrics.update(_check_password_policy(iam, findings))
+
+    try:
+        account_id = sts.get_caller_identity()["Account"]
+        metrics.update(_check_account_encryption_defaults(ec2, rds, s3control, account_id, findings))
+    except ClientError as exc:
+        print(f"Could not resolve account ID for S3 account-level checks: {exc}")
 
     metric_data = [
         {"MetricName": name, "Value": value, "Unit": "Count"} for name, value in metrics.items()

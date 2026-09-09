@@ -326,6 +326,157 @@ def test_check_trusted_advisor_when_unavailable_on_basic_support():
     assert metrics == {"TrustedAdvisorAvailable": 0, "TrustedAdvisorSecurityChecksFlagged": 0}
 
 
+def test_check_detector_status_all_enabled():
+    guardduty = MagicMock()
+    guardduty.list_detectors.return_value = {"DetectorIds": ["det-1"]}
+    guardduty.get_detector.return_value = {"Status": "ENABLED"}
+
+    securityhub = MagicMock()
+    securityhub.describe_hub.return_value = {"HubArn": "arn:x"}
+
+    inspector2 = MagicMock()
+    inspector2.batch_get_account_status.return_value = {
+        "accounts": [{"resourceState": {"ec2": {"status": "ENABLED"}, "ecr": {"status": "DISABLED"}}}]
+    }
+
+    findings = []
+    metrics = collector._check_detector_status(guardduty, securityhub, inspector2, findings)
+
+    assert metrics == {"GuardDutyEnabled": 1, "SecurityHubEnabled": 1, "Inspector2Enabled": 1}
+    assert findings == []
+
+
+def test_check_detector_status_all_disabled():
+    guardduty = MagicMock()
+    guardduty.list_detectors.return_value = {"DetectorIds": []}
+
+    securityhub = MagicMock()
+    securityhub.describe_hub.side_effect = ClientError(
+        {"Error": {"Code": "InvalidAccessException"}}, "DescribeHub"
+    )
+
+    inspector2 = MagicMock()
+    inspector2.batch_get_account_status.return_value = {
+        "accounts": [{"resourceState": {"ec2": {"status": "DISABLED"}}}]
+    }
+
+    findings = []
+    metrics = collector._check_detector_status(guardduty, securityhub, inspector2, findings)
+
+    assert metrics == {"GuardDutyEnabled": 0, "SecurityHubEnabled": 0, "Inspector2Enabled": 0}
+    assert "GUARDDUTY_NOT_ENABLED" in findings
+    assert "SECURITY_HUB_NOT_ENABLED" in findings
+    assert "INSPECTOR2_NOT_ENABLED" in findings
+
+
+def test_check_account_encryption_defaults_all_compliant():
+    ec2 = MagicMock()
+    ec2.get_ebs_encryption_by_default.return_value = {"EbsEncryptionByDefault": True}
+
+    rds = MagicMock()
+    rds.get_paginator.return_value.paginate.return_value = [
+        {"DBInstances": [
+            {"DBInstanceIdentifier": "db1", "StorageEncrypted": True},
+            {"DBInstanceIdentifier": "db2", "StorageEncrypted": False},
+        ]}
+    ]
+
+    s3control = MagicMock()
+    s3control.get_public_access_block.return_value = {
+        "PublicAccessBlockConfiguration": {
+            "BlockPublicAcls": True,
+            "IgnorePublicAcls": True,
+            "BlockPublicPolicy": True,
+            "RestrictPublicBuckets": True,
+        }
+    }
+
+    findings = []
+    metrics = collector._check_account_encryption_defaults(ec2, rds, s3control, "111111111111", findings)
+
+    assert metrics == {
+        "EbsEncryptionByDefaultEnabled": 1,
+        "RdsInstancesUnencrypted": 1,
+        "S3AccountBlockPublicAccessEnabled": 1,
+    }
+    assert "RDS_STORAGE_UNENCRYPTED instance=db2" in findings
+
+
+def test_check_account_encryption_defaults_nothing_configured():
+    ec2 = MagicMock()
+    ec2.get_ebs_encryption_by_default.return_value = {"EbsEncryptionByDefault": False}
+
+    rds = MagicMock()
+    rds.get_paginator.return_value.paginate.return_value = [{"DBInstances": []}]
+
+    s3control = MagicMock()
+    s3control.get_public_access_block.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchPublicAccessBlockConfiguration"}}, "GetPublicAccessBlock"
+    )
+
+    findings = []
+    metrics = collector._check_account_encryption_defaults(ec2, rds, s3control, "111111111111", findings)
+
+    assert metrics == {
+        "EbsEncryptionByDefaultEnabled": 0,
+        "RdsInstancesUnencrypted": 0,
+        "S3AccountBlockPublicAccessEnabled": 0,
+    }
+    assert "EBS_ENCRYPTION_BY_DEFAULT_DISABLED" in findings
+    assert "S3_ACCOUNT_BLOCK_PUBLIC_ACCESS_NOT_CONFIGURED" in findings
+
+
+def test_check_password_policy_compliant():
+    iam = MagicMock()
+    iam.get_account_password_policy.return_value = {
+        "PasswordPolicy": {
+            "MinimumPasswordLength": 14,
+            "RequireSymbols": True,
+            "RequireNumbers": True,
+            "RequireUppercaseCharacters": True,
+            "RequireLowercaseCharacters": True,
+            "MaxPasswordAge": 90,
+            "PasswordReusePrevention": 24,
+        }
+    }
+
+    metrics = collector._check_password_policy(iam, [])
+
+    assert metrics == {"IamPasswordPolicyCompliant": 1}
+
+
+def test_check_password_policy_weak():
+    iam = MagicMock()
+    iam.get_account_password_policy.return_value = {
+        "PasswordPolicy": {
+            "MinimumPasswordLength": 8,
+            "RequireSymbols": False,
+            "RequireNumbers": True,
+            "RequireUppercaseCharacters": True,
+            "RequireLowercaseCharacters": True,
+        }
+    }
+
+    findings = []
+    metrics = collector._check_password_policy(iam, findings)
+
+    assert metrics == {"IamPasswordPolicyCompliant": 0}
+    assert "IAM_PASSWORD_POLICY_WEAK" in findings
+
+
+def test_check_password_policy_none_set():
+    iam = MagicMock()
+    iam.get_account_password_policy.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchEntity"}}, "GetAccountPasswordPolicy"
+    )
+
+    findings = []
+    metrics = collector._check_password_policy(iam, findings)
+
+    assert metrics == {"IamPasswordPolicyCompliant": 0}
+    assert "NO_IAM_PASSWORD_POLICY" in findings
+
+
 @patch("fedramp20x_collector.boto3.client")
 def test_handler_publishes_all_metrics(mock_client):
     config = MagicMock()
@@ -356,6 +507,7 @@ def test_handler_publishes_all_metrics(mock_client):
     ec2.describe_vpcs.return_value = {"Vpcs": []}
     ec2.describe_network_acls.return_value = {"NetworkAcls": []}
     ec2.get_paginator.return_value.paginate.return_value = [{"Reservations": []}]
+    ec2.get_ebs_encryption_by_default.return_value = {"EbsEncryptionByDefault": True}
 
     acm = MagicMock()
     acm.get_paginator.return_value.paginate.return_value = [{"CertificateSummaryList": []}]
@@ -365,12 +517,30 @@ def test_handler_publishes_all_metrics(mock_client):
 
     securityhub = MagicMock()
     securityhub.get_paginator.return_value.paginate.return_value = [{"Findings": []}]
+    securityhub.describe_hub.return_value = {"HubArn": "arn:x"}
 
     inspector2 = MagicMock()
     inspector2.get_paginator.return_value.paginate.return_value = [{"findings": []}]
+    inspector2.batch_get_account_status.return_value = {"accounts": [{"resourceState": {}}]}
 
     support = MagicMock()
     support.describe_trusted_advisor_checks.return_value = {"checks": []}
+
+    guardduty = MagicMock()
+    guardduty.list_detectors.return_value = {"DetectorIds": []}
+
+    s3control = MagicMock()
+    s3control.get_public_access_block.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchPublicAccessBlockConfiguration"}}, "GetPublicAccessBlock"
+    )
+
+    iam = MagicMock()
+    iam.get_account_password_policy.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchEntity"}}, "GetAccountPasswordPolicy"
+    )
+
+    sts = MagicMock()
+    sts.get_caller_identity.return_value = {"Account": "111111111111"}
 
     cw = MagicMock()
 
@@ -388,6 +558,10 @@ def test_handler_publishes_all_metrics(mock_client):
             "securityhub": securityhub,
             "inspector2": inspector2,
             "support": support,
+            "guardduty": guardduty,
+            "s3control": s3control,
+            "iam": iam,
+            "sts": sts,
             "cloudwatch": cw,
         }[service]
 
@@ -395,12 +569,12 @@ def test_handler_publishes_all_metrics(mock_client):
 
     result = collector.handler({}, None)
 
-    assert result["metrics_published"] == 26  # every metric this collector defines, both tranches
-    # 26 metrics > the chunk size of 20, so this spans two put_metric_data calls.
+    assert result["metrics_published"] == 33  # every metric this collector defines, all three tranches
+    # 33 metrics > the chunk size of 20, so this spans two put_metric_data calls.
     assert cw.put_metric_data.call_count == 2
     total_published = sum(
         len(call.kwargs["MetricData"]) for call in cw.put_metric_data.call_args_list
     )
-    assert total_published == 26
+    assert total_published == 33
     for call in cw.put_metric_data.call_args_list:
         assert call.kwargs["Namespace"] == "FedRAMP20xAudit"
