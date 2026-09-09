@@ -151,14 +151,14 @@ existing metrics.
 | KSI-CNA-RNT | Network traffic is restricted to what's needed | network-exposure-dashboard's Open Security Group Rules metric |
 | KSI-SVC-SIN | Information is encrypted/secured from unwanted access | network-exposure-dashboard's public S3/RDS/LB widgets |
 | KSI-MLA-RVL | Logs are persistently reviewed and audited | security-posture-dashboard's Security Hub/GuardDuty finding-count metrics |
-| KSI-CNA-OFA | Resources are optimized for HA and rapid recovery | RDS Instances Not Multi-AZ + Auto Scaling Groups in a Single AZ widgets |
-| KSI-CNA-EIS | Non-compliant resources are automatically brought back to intended state | Config Rules With/Without Auto-Remediation widgets |
-| KSI-CNA-ULN | Logical networking is used and reviewed to enforce traffic flow controls | VPCs Relying on Default NACL Only + VPC Endpoints Count widgets |
-| KSI-SVC-VCM | Authenticity/integrity of communications is validated | ACM Certificates Expiring + S3 Buckets Without Secure-Transport Policy widgets |
-| KSI-SVC-EIS | Opportunities to improve security are persistently evaluated and made | Security Hub Standards Score widget (% of evaluated controls passing) |
-| KSI-SCR-MON | Third-party software is monitored for upstream vulnerabilities | Inspector Findings widget — account-wide (EC2, Lambda, ECR), not just EKS |
-| KSI-IAM-SNU | Appropriately secure auth methods are used for non-user accounts | EC2 Instances Without Instance Profile widget |
-| KSI-CNA-IBP | Configuration is compared against provider best-practice guidance | Trusted Advisor security-check widget (requires Business/Enterprise support) |
+| KSI-CNA-OFA | Resources are optimized for high availability and rapid recovery | RDS Instances Not Multi-AZ + Auto Scaling Groups in a Single AZ widgets |
+| KSI-CNA-EIS | Non-compliant resources are automatically brought back to their intended state | Config Rules With/Without Auto-Remediation widgets |
+| KSI-CNA-ULN | Logical networking is used and reviewed to enforce traffic flow controls | VPC Endpoints Count + VPCs Relying on Default NACL Only widgets |
+| KSI-SVC-VCM | The authenticity/integrity of communications is validated | ACM Certificates Expiring widget + S3 Buckets Without Secure-Transport Policy widget |
+| KSI-SVC-EIS | Opportunities to improve security are persistently evaluated and made | Security Hub Standards Score (% controls passed) widget |
+| KSI-SCR-MON | Upstream vulnerabilities are persistently monitored | Inspector Findings, Account-Wide widget (Critical/High severity, all resource types — not just EKS/ECR) |
+| KSI-IAM-SNU | Appropriately secure authentication is used for non-user accounts/services | EC2 Instances Without Instance Profile widget |
+| KSI-CNA-IBP | Configuration is persistently compared against provider best-practice guidance | Trusted Advisor Checks Flagged widget (requires Business/Enterprise support — reports unavailable rather than erroring on Basic/Developer plans) |
 
 ### What this dashboard does NOT cover, and why
 
@@ -212,6 +212,22 @@ staleness, public-only API endpoints).
 - **AWS Config and CloudTrail must already be enabled** for their widgets to
   mean anything; this dashboard reports their absence as a `0`/non-compliant
   signal rather than trying to enable them for you.
+- **Trusted Advisor coverage requires a Business or Enterprise support
+  plan.** On Basic/Developer plans, `TrustedAdvisorAvailable` reports `0`
+  rather than erroring — that's itself useful signal for an assessor, but
+  it means the widget won't show real data on lower support tiers.
+- **The Security Hub score widget pages through every ACTIVE finding with a
+  PASSED/FAILED compliance status** in the account to compute a percentage.
+  On a large, long-running account this can be a lot of findings — the
+  collector's timeout was raised to 300s/512MB specifically to give this
+  (and the rest of the second-tranche checks) enough headroom, but very
+  large accounts may want to tune that further.
+- **Regional scope.** Like the first-tranche checks, everything in this
+  collector runs against the Lambda's own deployed region only (except
+  Trusted Advisor and S3, which are effectively global) — Config, CloudTrail,
+  Backup, RDS, ASG, EC2, VPC, and ACM findings from other regions won't
+  appear unless you deploy the collector per-region. Multi-region looping
+  (the way `network-exposure-dashboard` does it) is a natural follow-up.
 
 ## Encryption
 
