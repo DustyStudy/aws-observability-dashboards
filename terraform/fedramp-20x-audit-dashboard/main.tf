@@ -188,6 +188,7 @@ data "aws_iam_policy_document" "audit_collector_permissions" {
       "ec2:DescribeVpcs",
       "ec2:DescribeNetworkAcls",
       "ec2:DescribeInstances",
+      "ec2:DescribeRegions",
     ]
     resources = ["*"] # These read-only EC2 APIs do not support resource-level permissions
   }
@@ -316,8 +317,8 @@ resource "aws_lambda_function" "audit_collector" {
   role          = aws_iam_role.audit_collector.arn
   handler       = "fedramp20x_collector.handler"
   runtime       = "python3.12"
-  timeout       = 300
-  memory_size   = 512
+  timeout       = 900
+  memory_size   = 1024
 
   filename         = data.archive_file.audit_collector.output_path
   source_code_hash = data.archive_file.audit_collector.output_base64sha256

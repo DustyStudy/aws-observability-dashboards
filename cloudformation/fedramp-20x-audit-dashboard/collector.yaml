@@ -4,16 +4,17 @@ Description: >
   fedramp-20x-audit-dashboard, meant to be deployed via a CloudFormation
   StackSet to every account in your organization (see
   ../../org-observability/README.md). This stack has NO dashboard; it only
-  runs a daily scan of Config, CloudTrail, Backup, Access Analyzer,
-  RDS/ASG HA posture, Config auto-remediation, VPC endpoint/NACL posture,
-  ACM/S3 secure-transport checks, a Security Hub score, account-wide
-  Inspector findings, EC2 instance-profile coverage, whether GuardDuty/
-  Security Hub/Inspector are actually enabled, EBS/RDS/S3 encryption
-  defaults, and IAM password policy strength, then publishes metrics
-  locally. It intentionally does NOT duplicate checks the other six
-  dashboards in this repo already publish. Pair this with
-  org-dashboard.yaml, deployed once in your central monitoring account, to
-  see every account's evidence in one place. For a single account, use
+  runs a daily scan, across every enabled region in the account, of Config,
+  CloudTrail, Backup, Access Analyzer, RDS/ASG HA posture, Config
+  auto-remediation, VPC endpoint/NACL posture, ACM/S3 secure-transport
+  checks, a Security Hub score, account-wide Inspector findings, EC2
+  instance-profile coverage, whether GuardDuty/Security Hub/Inspector are
+  actually enabled, EBS/RDS/S3 encryption defaults, and IAM password policy
+  strength, then publishes account-wide metrics. It intentionally does NOT
+  duplicate checks the other six dashboards in this repo already publish.
+  Pair this with org-dashboard.yaml, deployed once in your central
+  monitoring account, to see every account's evidence in one place. For a
+  single account, use
   template.yaml instead.
 
 Parameters:
@@ -189,6 +190,7 @@ Resources:
                   - ec2:DescribeVpcs
                   - ec2:DescribeNetworkAcls
                   - ec2:DescribeInstances
+                  - ec2:DescribeRegions
                 Resource: "*" # These read-only EC2 APIs do not support resource-level permissions
               - Sid: ReadSecureCommunicationsPosture
                 Effect: Allow
@@ -280,8 +282,8 @@ Resources:
       Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt AuditCollectorRole.Arn
-      Timeout: 300
-      MemorySize: 512
+      Timeout: 900
+      MemorySize: 1024
       ReservedConcurrentExecutions: 1
       KmsKeyArn: !GetAtt AuditKmsKey.Arn
       DeadLetterConfig:
@@ -513,9 +515,9 @@ Resources:
               return value == "false"
 
 
-          def _check_secure_communications(acm, s3, findings):
-              """KSI-SVC-VCM: is the authenticity/integrity of communications validated."""
-              metrics = {"AcmCertsExpiringSoon": 0, "S3BucketsWithoutSecureTransportPolicy": 0}
+          def _check_acm_certificates(acm, findings):
+              """KSI-SVC-VCM, regional half: ACM certificates expiring soon in this region."""
+              metrics = {"AcmCertsExpiringSoon": 0}
               expiry_cutoff = datetime.now(timezone.utc) + timedelta(days=30)
 
               try:
@@ -533,6 +535,17 @@ Resources:
               except ClientError as exc:
                   print(f"ACM certificate check failed: {exc}")
 
+              return metrics
+
+
+          def _check_s3_secure_transport(s3, findings):
+              """KSI-SVC-VCM, global half: S3 buckets missing a deny-insecure-transport policy.
+
+              S3 buckets are account-wide, not per-region -- list_buckets() already
+              returns every bucket regardless of which region it lives in, so this
+              runs exactly once, not once per region.
+              """
+              metrics = {"S3BucketsWithoutSecureTransportPolicy": 0}
               try:
                   for bucket in s3.list_buckets().get("Buckets", []):
                       name = bucket["Name"]
@@ -555,10 +568,15 @@ Resources:
 
 
           def _check_security_hub_score(securityhub, findings):
-              """KSI-SVC-EIS: are opportunities to improve security persistently evaluated and made."""
-              metrics = {"SecurityHubStandardsScorePercent": 0, "SecurityHubControlsEvaluated": 0}
-              passed = 0
-              failed = 0
+              """KSI-SVC-EIS: are opportunities to improve security persistently evaluated and made.
+
+              Returns raw passed/failed counts rather than a percentage -- when this
+              runs once per region, the caller sums passed and failed across every
+              region first and computes one account-wide percentage at the end, since
+              averaging pre-computed percentages across regions would weight a
+              5-control region the same as a 500-control one.
+              """
+              metrics = {"SecurityHubControlsPassed": 0, "SecurityHubControlsFailed": 0}
               try:
                   paginator = securityhub.get_paginator("get_findings")
                   for page in paginator.paginate(
@@ -573,16 +591,13 @@ Resources:
                       for finding in page.get("Findings", []):
                           status = finding.get("Compliance", {}).get("Status")
                           if status == "PASSED":
-                              passed += 1
+                              metrics["SecurityHubControlsPassed"] += 1
                           elif status == "FAILED":
-                              failed += 1
+                              metrics["SecurityHubControlsFailed"] += 1
                               findings.append(f"SECURITY_HUB_CONTROL_FAILED id={finding.get('GeneratorId')}")
               except ClientError as exc:
                   print(f"Security Hub score check failed: {exc}")
 
-              total = passed + failed
-              metrics["SecurityHubControlsEvaluated"] = total
-              metrics["SecurityHubStandardsScorePercent"] = round((passed / total) * 100) if total else 0
               return metrics
 
 
@@ -707,13 +722,9 @@ Resources:
               return metrics
 
 
-          def _check_account_encryption_defaults(ec2, rds, s3control, account_id, findings):
-              """KSI-SVC-SIN, account-wide defaults: EBS/RDS encryption and S3 public-access blocking."""
-              metrics = {
-                  "EbsEncryptionByDefaultEnabled": 0,
-                  "RdsInstancesUnencrypted": 0,
-                  "S3AccountBlockPublicAccessEnabled": 0,
-              }
+          def _check_ebs_and_rds_encryption(ec2, rds, findings):
+              """KSI-SVC-SIN, regional half: EBS encryption-by-default (a per-region account setting) and RDS storage encryption."""
+              metrics = {"EbsEncryptionByDefaultEnabled": 0, "RdsInstancesUnencrypted": 0}
 
               try:
                   if ec2.get_ebs_encryption_by_default().get("EbsEncryptionByDefault"):
@@ -733,6 +744,16 @@ Resources:
               except ClientError as exc:
                   print(f"RDS storage-encryption check failed: {exc}")
 
+              return metrics
+
+
+          def _check_s3_account_public_access(s3control, account_id, findings):
+              """KSI-SVC-SIN, global half: S3 account-level Block Public Access.
+
+              This setting is account-wide, not per-region, so it runs exactly once,
+              not once per region.
+              """
+              metrics = {"S3AccountBlockPublicAccessEnabled": 0}
               try:
                   config = s3control.get_public_access_block(AccountId=account_id).get(
                       "PublicAccessBlockConfiguration", {}
@@ -782,53 +803,180 @@ Resources:
                   yield items[i:i + size]
 
 
+          def _enabled_regions(ec2):
+              """Every region this account can actually call, not every region that exists.
+
+              AllRegions=False returns only regions with an opt-in-status of
+              'opted-in' or 'opt-in-not-required' -- calling a regional API against a
+              region the account was never opted into just raises an
+              AuthFailure/UnrecognizedClientException, so this avoids that entirely
+              rather than catching it 30+ times per run.
+              """
+              try:
+                  regions = ec2.describe_regions(AllRegions=False).get("Regions", [])
+                  names = sorted(r["RegionName"] for r in regions)
+                  if names:
+                      return names
+              except ClientError as exc:
+                  print(f"describe_regions failed, falling back to this Lambda's own region: {exc}")
+
+              fallback = boto3.session.Session().region_name
+              return [fallback] if fallback else ["us-east-1"]
+
+
+          def _merge_and(current, new_value):
+              """True only if every region checked so far reports true -- for 'is X enabled account-wide'."""
+              return 1 if (current == 1 and new_value == 1) else 0
+
+
+          def _merge_or(current, new_value):
+              """True if any region reports true -- for 'does at least one trail/resource satisfy this'."""
+              return 1 if (current == 1 or new_value == 1) else 0
+
+
           def handler(event, context):
               findings = []
-              non_compliant_rule_names = []
 
-              config = boto3.client("config")
-              cloudtrail = boto3.client("cloudtrail")
-              backup = boto3.client("backup")
-              analyzer = boto3.client("accessanalyzer")
-              rds = boto3.client("rds")
-              autoscaling = boto3.client("autoscaling")
-              ec2 = boto3.client("ec2")
-              acm = boto3.client("acm")
-              s3 = boto3.client("s3")
-              securityhub = boto3.client("securityhub")
-              inspector2 = boto3.client("inspector2")
-              # The Support API only has an endpoint in us-east-1, regardless of
-              # which region this Lambda itself runs in.
+              # Global, single-call clients -- these services are account-wide, not
+              # per-region, so looping them would just repeat identical work.
+              default_ec2 = boto3.client("ec2")
               support = boto3.client("support", region_name="us-east-1")
-              guardduty = boto3.client("guardduty")
+              s3 = boto3.client("s3")
               s3control = boto3.client("s3control")
               iam = boto3.client("iam")
               sts = boto3.client("sts")
 
-              metrics = {}
-              metrics.update(_check_config(config, findings, non_compliant_rule_names))
-              metrics.update(_check_cloudtrail(cloudtrail, findings))
-              metrics.update(_check_backups(backup, findings))
-              metrics.update(_check_access_analyzer(analyzer, findings))
-              metrics.update(_check_high_availability(rds, autoscaling, findings))
-              metrics.update(_check_auto_remediation(config, non_compliant_rule_names, findings))
-              metrics.update(_check_network_segmentation(ec2, findings))
-              metrics.update(_check_secure_communications(acm, s3, findings))
-              metrics.update(_check_security_hub_score(securityhub, findings))
-              metrics.update(_check_inspector_findings(inspector2, findings))
-              metrics.update(_check_non_user_auth(ec2, findings))
-              metrics.update(_check_trusted_advisor(support, findings))
-              metrics.update(_check_detector_status(guardduty, securityhub, inspector2, findings))
-              metrics.update(_check_password_policy(iam, findings))
+              regions = _enabled_regions(default_ec2)
+
+              # Every regional metric this collector publishes, seeded so the
+              # AND-merged booleans start "true" (a region has to actually disprove
+              # it) and OR-merged/summed ones start at their natural zero.
+              totals = {
+                  "ConfigRecorderEnabled": 1,
+                  "ConfigRulesCompliant": 0,
+                  "ConfigRulesNonCompliant": 0,
+                  "CloudTrailMultiRegionEnabled": 0,
+                  "CloudTrailLogFileValidationEnabled": 0,
+                  "CloudTrailLoggingActive": 0,
+                  "BackupPlansCount": 0,
+                  "BackupJobsSucceeded24h": 0,
+                  "BackupJobsFailed24h": 0,
+                  "AccessAnalyzerActive": 1,
+                  "AccessAnalyzerExternalAccessFindings": 0,
+                  "RdsInstancesNotMultiAz": 0,
+                  "AsgSingleAzCount": 0,
+                  "ConfigRulesWithRemediation": 0,
+                  "ConfigRulesWithoutRemediation": 0,
+                  "VpcEndpointsCount": 0,
+                  "VpcsWithoutCustomNacl": 0,
+                  "AcmCertsExpiringSoon": 0,
+                  "SecurityHubControlsPassed": 0,
+                  "SecurityHubControlsFailed": 0,
+                  "Inspector2CriticalFindings": 0,
+                  "Inspector2HighFindings": 0,
+                  "Ec2InstancesWithoutInstanceProfile": 0,
+                  "GuardDutyEnabled": 1,
+                  "SecurityHubEnabled": 1,
+                  "Inspector2Enabled": 1,
+                  "EbsEncryptionByDefaultEnabled": 1,
+                  "RdsInstancesUnencrypted": 0,
+              }
+
+              for region in regions:
+                  region_findings = []
+
+                  config = boto3.client("config", region_name=region)
+                  cloudtrail = boto3.client("cloudtrail", region_name=region)
+                  backup = boto3.client("backup", region_name=region)
+                  analyzer = boto3.client("accessanalyzer", region_name=region)
+                  rds = boto3.client("rds", region_name=region)
+                  autoscaling = boto3.client("autoscaling", region_name=region)
+                  ec2 = boto3.client("ec2", region_name=region)
+                  acm = boto3.client("acm", region_name=region)
+                  securityhub = boto3.client("securityhub", region_name=region)
+                  inspector2 = boto3.client("inspector2", region_name=region)
+                  guardduty = boto3.client("guardduty", region_name=region)
+
+                  non_compliant_rule_names = []
+
+                  cfg = _check_config(config, region_findings, non_compliant_rule_names)
+                  totals["ConfigRecorderEnabled"] = _merge_and(totals["ConfigRecorderEnabled"], cfg["ConfigRecorderEnabled"])
+                  totals["ConfigRulesCompliant"] += cfg["ConfigRulesCompliant"]
+                  totals["ConfigRulesNonCompliant"] += cfg["ConfigRulesNonCompliant"]
+
+                  ct = _check_cloudtrail(cloudtrail, region_findings)
+                  totals["CloudTrailMultiRegionEnabled"] = _merge_or(totals["CloudTrailMultiRegionEnabled"], ct["CloudTrailMultiRegionEnabled"])
+                  totals["CloudTrailLogFileValidationEnabled"] = _merge_or(totals["CloudTrailLogFileValidationEnabled"], ct["CloudTrailLogFileValidationEnabled"])
+                  totals["CloudTrailLoggingActive"] = _merge_or(totals["CloudTrailLoggingActive"], ct["CloudTrailLoggingActive"])
+
+                  bk = _check_backups(backup, region_findings)
+                  totals["BackupPlansCount"] += bk["BackupPlansCount"]
+                  totals["BackupJobsSucceeded24h"] += bk["BackupJobsSucceeded24h"]
+                  totals["BackupJobsFailed24h"] += bk["BackupJobsFailed24h"]
+
+                  aa = _check_access_analyzer(analyzer, region_findings)
+                  totals["AccessAnalyzerActive"] = _merge_and(totals["AccessAnalyzerActive"], aa["AccessAnalyzerActive"])
+                  totals["AccessAnalyzerExternalAccessFindings"] += aa["AccessAnalyzerExternalAccessFindings"]
+
+                  ha = _check_high_availability(rds, autoscaling, region_findings)
+                  totals["RdsInstancesNotMultiAz"] += ha["RdsInstancesNotMultiAz"]
+                  totals["AsgSingleAzCount"] += ha["AsgSingleAzCount"]
+
+                  rem = _check_auto_remediation(config, non_compliant_rule_names, region_findings)
+                  totals["ConfigRulesWithRemediation"] += rem["ConfigRulesWithRemediation"]
+                  totals["ConfigRulesWithoutRemediation"] += rem["ConfigRulesWithoutRemediation"]
+
+                  net = _check_network_segmentation(ec2, region_findings)
+                  totals["VpcEndpointsCount"] += net["VpcEndpointsCount"]
+                  totals["VpcsWithoutCustomNacl"] += net["VpcsWithoutCustomNacl"]
+
+                  acm_result = _check_acm_certificates(acm, region_findings)
+                  totals["AcmCertsExpiringSoon"] += acm_result["AcmCertsExpiringSoon"]
+
+                  sh = _check_security_hub_score(securityhub, region_findings)
+                  totals["SecurityHubControlsPassed"] += sh["SecurityHubControlsPassed"]
+                  totals["SecurityHubControlsFailed"] += sh["SecurityHubControlsFailed"]
+
+                  insp = _check_inspector_findings(inspector2, region_findings)
+                  totals["Inspector2CriticalFindings"] += insp["Inspector2CriticalFindings"]
+                  totals["Inspector2HighFindings"] += insp["Inspector2HighFindings"]
+
+                  nua = _check_non_user_auth(ec2, region_findings)
+                  totals["Ec2InstancesWithoutInstanceProfile"] += nua["Ec2InstancesWithoutInstanceProfile"]
+
+                  det = _check_detector_status(guardduty, securityhub, inspector2, region_findings)
+                  totals["GuardDutyEnabled"] = _merge_and(totals["GuardDutyEnabled"], det["GuardDutyEnabled"])
+                  totals["SecurityHubEnabled"] = _merge_and(totals["SecurityHubEnabled"], det["SecurityHubEnabled"])
+                  totals["Inspector2Enabled"] = _merge_and(totals["Inspector2Enabled"], det["Inspector2Enabled"])
+
+                  enc = _check_ebs_and_rds_encryption(ec2, rds, region_findings)
+                  totals["EbsEncryptionByDefaultEnabled"] = _merge_and(totals["EbsEncryptionByDefaultEnabled"], enc["EbsEncryptionByDefaultEnabled"])
+                  totals["RdsInstancesUnencrypted"] += enc["RdsInstancesUnencrypted"]
+
+                  findings.extend(f"region={region} {line}" for line in region_findings)
+
+              # Global checks -- run exactly once, not once per region.
+              totals.update(_check_trusted_advisor(support, findings))
+              totals.update(_check_password_policy(iam, findings))
+              totals.update(_check_s3_secure_transport(s3, findings))
 
               try:
                   account_id = sts.get_caller_identity()["Account"]
-                  metrics.update(_check_account_encryption_defaults(ec2, rds, s3control, account_id, findings))
+                  totals.update(_check_s3_account_public_access(s3control, account_id, findings))
               except ClientError as exc:
                   print(f"Could not resolve account ID for S3 account-level checks: {exc}")
 
+              # One account-wide Security Hub score computed from the regional sums,
+              # not averaged per-region -- a 500-control region should outweigh a
+              # 5-control one, not count equally.
+              evaluated = totals["SecurityHubControlsPassed"] + totals["SecurityHubControlsFailed"]
+              totals["SecurityHubControlsEvaluated"] = evaluated
+              totals["SecurityHubStandardsScorePercent"] = (
+                  round((totals["SecurityHubControlsPassed"] / evaluated) * 100) if evaluated else 0
+              )
+
               metric_data = [
-                  {"MetricName": name, "Value": value, "Unit": "Count"} for name, value in metrics.items()
+                  {"MetricName": name, "Value": value, "Unit": "Count"} for name, value in totals.items()
               ]
 
               cw = boto3.client("cloudwatch")

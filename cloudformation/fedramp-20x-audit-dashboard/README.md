@@ -56,7 +56,8 @@ Also required:
   (`access-analyzer:List*`), RDS (`rds:DescribeDBInstances`), Auto Scaling
   (`autoscaling:DescribeAutoScalingGroups`), EC2 (`ec2:DescribeVpc*`,
   `ec2:DescribeNetworkAcls`, `ec2:DescribeInstances`,
-  `ec2:GetEbsEncryptionByDefault`), ACM (`acm:ListCertificates`,
+  `ec2:GetEbsEncryptionByDefault`, `ec2:DescribeRegions`), ACM
+  (`acm:ListCertificates`,
   `acm:DescribeCertificate`), S3 (`s3:ListAllMyBuckets`,
   `s3:GetBucketPolicy`, `s3:GetAccountPublicAccessBlock`), Security Hub
   (`securityhub:GetFindings`, `securityhub:DescribeHub`), Inspector
@@ -73,10 +74,12 @@ Also required:
   support plan.** On Basic/Developer support, `TrustedAdvisorAvailable`
   reports `0` rather than erroring — also useful signal, since an assessor
   may ask why it's unavailable
-- The Lambda's timeout is 300s/512MB by default — large accounts with many
-  S3 buckets, ACM certificates, or Security Hub findings may need this
-  raised further; the collector logs which check is running so a timeout
-  is easy to attribute to a specific service
+- The collector scans **every enabled region in the account**, not just
+  where the Lambda itself runs — see [Known limitations](#known-limitations)
+  for exactly how results get combined across regions. The Lambda's timeout
+  is 900s/1024MB by default (900s is Lambda's own ceiling) to give a
+  multi-region, multi-service scan enough headroom; the collector logs
+  which check is running in which region so a timeout is easy to attribute
 
 No QuickSight license required.
 
@@ -225,18 +228,24 @@ staleness, public-only API endpoints).
   rather than erroring — that's itself useful signal for an assessor, but
   it means the widget won't show real data on lower support tiers.
 - **The Security Hub score widget pages through every ACTIVE finding with a
-  PASSED/FAILED compliance status** in the account to compute a percentage.
-  On a large, long-running account this can be a lot of findings — the
-  collector's timeout was raised to 300s/512MB specifically to give this
-  (and the rest of the second-tranche checks) enough headroom, but very
-  large accounts may want to tune that further.
-- **Regional scope.** Like the first- and second-tranche checks, GuardDuty,
-  Security Hub, Inspector2, RDS, and EBS encryption-default status are
-  checked in the Lambda's own deployed region only — a detector enabled in
-  one region but not another won't be caught unless you deploy the
-  collector per-region. IAM password policy and S3 account-level Block
-  Public Access are genuinely account-wide (not regional), so those two are
-  unaffected by this limitation.
+  PASSED/FAILED compliance status** in the account, across every enabled
+  region, to compute one account-wide percentage. On a large, multi-region
+  account this can be a lot of findings — the collector's timeout was
+  raised to 900s/1024MB (Lambda's own timeout ceiling) specifically to give
+  this, and the rest of the multi-region scan, enough headroom.
+- **Multi-region scan.** The collector calls `ec2:DescribeRegions` at the
+  start of every run and loops every service check across every region the
+  account is opted into — it does not just check the Lambda's own deployed
+  region. "Is X enabled" metrics (Config recorder, GuardDuty, Security Hub,
+  Inspector2, EBS encryption-by-default) report `1` only if **every**
+  region has it enabled; a single region with it off makes the account-wide
+  metric `0`. Count metrics (non-compliant rules, findings, unencrypted
+  instances) are summed across all regions. CloudTrail-related metrics are
+  the one exception: since a single multi-region trail covers the whole
+  account, those are `1` if **any** region has a qualifying trail, not
+  every region. IAM password policy and S3 account-level Block Public
+  Access are checked once, since both are genuinely account-wide settings,
+  not per-region ones.
 - **The S3 account-level Block Public Access check needs the account's own
   ID**, resolved via one `sts:GetCallerIdentity` call per run. If that call
   fails for any reason, only that one check is skipped for the run — every
