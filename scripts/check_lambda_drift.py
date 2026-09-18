@@ -39,6 +39,8 @@ PAIRS = {
         "terraform/ai-service-inventory-dashboard/lambda/ai_service_inventory_collector.py",
     "cloudformation/eks-security-dashboard/template.yaml":
         "terraform/eks-security-dashboard/lambda/eks_patch_drift_checker.py",
+    "cloudformation/fedramp-20x-audit-dashboard/template.yaml":
+        "terraform/fedramp-20x-audit-dashboard/lambda/fedramp20x_collector.py",
 }
 
 

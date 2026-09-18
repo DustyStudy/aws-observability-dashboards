@@ -79,14 +79,24 @@ resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid       = "AllowEventBridgeToWriteLogs"
+        Sid       = "AllowSecurityHubRuleToWriteItsLogGroup"
         Effect    = "Allow"
         Principal = { Service = "events.amazonaws.com" }
         Action    = ["logs:PutLogEvents", "logs:CreateLogStream"]
-        Resource = [
-          aws_cloudwatch_log_group.security_hub.arn,
-          aws_cloudwatch_log_group.guardduty.arn,
-        ]
+        Resource  = aws_cloudwatch_log_group.security_hub.arn
+        Condition = {
+          ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.security_hub_findings.arn }
+        }
+      },
+      {
+        Sid       = "AllowGuardDutyRuleToWriteItsLogGroup"
+        Effect    = "Allow"
+        Principal = { Service = "events.amazonaws.com" }
+        Action    = ["logs:PutLogEvents", "logs:CreateLogStream"]
+        Resource  = aws_cloudwatch_log_group.guardduty.arn
+        Condition = {
+          ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.guardduty_findings.arn }
+        }
       },
     ]
   })

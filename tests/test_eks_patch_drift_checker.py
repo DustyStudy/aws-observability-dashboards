@@ -140,7 +140,7 @@ def test_stale_ami_nodegroup_detected(mock_client):
     }
     mock_eks.list_nodegroups.return_value = {"nodegroups": ["ng-1"]}
 
-    old_date = (datetime.datetime.utcnow() - datetime.timedelta(days=120)).strftime("%Y%m%d")
+    old_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=120)).strftime("%Y%m%d")
     mock_eks.describe_nodegroup.return_value = {
         "nodegroup": {
             "version": "1.31",
@@ -175,7 +175,7 @@ def test_recent_ami_nodegroup_not_flagged_stale(mock_client):
     }
     mock_eks.list_nodegroups.return_value = {"nodegroups": ["ng-1"]}
 
-    recent_date = (datetime.datetime.utcnow() - datetime.timedelta(days=5)).strftime("%Y%m%d")
+    recent_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=5)).strftime("%Y%m%d")
     mock_eks.describe_nodegroup.return_value = {
         "nodegroup": {
             "version": "1.31",

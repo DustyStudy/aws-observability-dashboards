@@ -98,10 +98,13 @@ intact at any scale.
      --regions us-east-1 \
      --region us-east-1
    ```
-   Repeat for `bedrock-usage-cost-dashboard`, `ai-service-inventory-dashboard`,
-   `network-exposure-dashboard`, `eks-security-dashboard`, and
-   `agentic-ai-guardrails-dashboard` / `security-posture-dashboard` once
-   they're split into collector/org-dashboard pairs (see below).
+   Repeat for `fedramp-20x-audit-dashboard`, `security-posture-dashboard`,
+   `bedrock-usage-cost-dashboard`, `ai-service-inventory-dashboard`,
+   `network-exposure-dashboard`, and `eks-security-dashboard` — all seven
+   `collector.yaml`/`collector/` pairs already exist (see below). The lone
+   exception is `agentic-ai-guardrails-dashboard`, which has no local
+   collector at all (Bedrock publishes its metrics natively), so there's
+   nothing to StackSet for it — only its OAM Link.
 
 5. **Deploy the org-dashboard once**, in the monitoring account, after the
    collectors have run at least once (give it a day, since most collectors
@@ -118,11 +121,11 @@ intact at any scale.
    directly (`member_account_ids` variable), no StackSets needed for this
    one piece since it only deploys once.
 
-## Current status: two dashboards fully converted
+## Current status: three dashboards fully converted
 
-**nhi-governance-dashboard** and **agentic-ai-guardrails-dashboard** are
-complete reference implementations, covering the two distinct widget
-patterns you'll need for the rest:
+**nhi-governance-dashboard**, **agentic-ai-guardrails-dashboard**, and
+**fedramp-20x-audit-dashboard** are complete reference implementations,
+covering the widget patterns you'll need for the rest:
 
 - **nhi-governance**: simple un-dimensioned metrics (`StaleAccessKeys`,
   `TotalIamRoles`, etc.) — the `metric_groups`/`_sum_across_accounts`
@@ -136,12 +139,23 @@ patterns you'll need for the rest:
   Its `GuardrailPolicyType`-dimensioned widget also demonstrates the
   "variable series per account, don't collapse to one number" case: one
   visible `SEARCH()` per account shown side by side.
+- **fedramp-20x-audit**: reuses nhi-governance's `metric_groups`/`SUM()`
+  pattern for its own collector's metrics, plus the added case of widgets
+  that read a *different* dashboard's metric namespace directly (via
+  `SEARCH()` against the `nhi-governance`/`network-exposure`/
+  `security-posture` namespaces) rather than only its own — the pattern
+  you'll need for any dashboard whose org-dashboard composites another
+  dashboard's metrics instead of collecting everything itself.
 
-Both were verified by extracting and actually *running* the widget-building
-logic against fake multi-account data (not just checking that the code
-compiles) — this caught a real bug during the nhi-governance build (metric
-math ID collisions when a single widget combines two metric groups) that a
-syntax check alone would have missed.
+The first two were verified by extracting and actually *running* the
+widget-building logic against fake multi-account data (not just checking
+that the code compiles) — this caught a real bug during the nhi-governance
+build (metric math ID collisions when a single widget combines two metric
+groups) that a syntax check alone would have missed. fedramp-20x-audit's
+own widgets reuse that same `metric_groups`/`SUM()` construction rather
+than introducing new widget-building logic, but haven't been run through
+that same fake-multi-account test harness yet — worth doing before relying
+on it at scale.
 
 The other five dashboards
 (`security-posture`, `bedrock-usage-cost`, `ai-service-inventory`,

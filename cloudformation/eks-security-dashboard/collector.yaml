@@ -124,7 +124,10 @@ Resources:
             "Effect": "Allow",
             "Principal": { "Service": "events.amazonaws.com" },
             "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-            "Resource": "${GuardDutyEksLogGroup.Arn}"
+            "Resource": "${GuardDutyEksLogGroup.Arn}",
+            "Condition": {
+              "ArnEquals": { "aws:SourceArn": "${GuardDutyEksRule.Arn}" }
+            }
           }]
         }
 
@@ -171,7 +174,10 @@ Resources:
             "Effect": "Allow",
             "Principal": { "Service": "events.amazonaws.com" },
             "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-            "Resource": "${InspectorEksLogGroup.Arn}"
+            "Resource": "${InspectorEksLogGroup.Arn}",
+            "Condition": {
+              "ArnEquals": { "aws:SourceArn": "${InspectorEksRule.Arn}" }
+            }
           }]
         }
 

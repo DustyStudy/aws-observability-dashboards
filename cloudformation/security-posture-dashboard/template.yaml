@@ -104,14 +104,24 @@ Resources:
           "Version": "2012-10-17",
           "Statement": [
             {
-              "Sid": "AllowEventBridgeToWriteLogs",
+              "Sid": "AllowSecurityHubRuleToWriteItsLogGroup",
               "Effect": "Allow",
               "Principal": { "Service": "events.amazonaws.com" },
               "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-              "Resource": [
-                "${SecurityHubLogGroup.Arn}",
-                "${GuardDutyLogGroup.Arn}"
-              ]
+              "Resource": "${SecurityHubLogGroup.Arn}",
+              "Condition": {
+                "ArnEquals": { "aws:SourceArn": "${SecurityHubFindingsRule.Arn}" }
+              }
+            },
+            {
+              "Sid": "AllowGuardDutyRuleToWriteItsLogGroup",
+              "Effect": "Allow",
+              "Principal": { "Service": "events.amazonaws.com" },
+              "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
+              "Resource": "${GuardDutyLogGroup.Arn}",
+              "Condition": {
+                "ArnEquals": { "aws:SourceArn": "${GuardDutyFindingsRule.Arn}" }
+              }
             }
           ]
         }
