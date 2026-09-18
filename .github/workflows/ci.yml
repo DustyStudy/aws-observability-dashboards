@@ -44,7 +44,7 @@ jobs:
           find cloudformation org-observability -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
 
       - name: Run Checkov (CloudFormation)
-        uses: bridgecrewio/checkov-action@v12.3122.0
+        uses: bridgecrewio/checkov-action@v12.3123.0
         with:
           # Repo root so this also picks up org-observability/, and any
           # future dashboard folder, without needing a CI change every time.
@@ -108,7 +108,7 @@ jobs:
       # NOTE: bridgecrewio/checkov-action is also left on a version tag, not
       # a SHA — same caveat as setup-tflint above.
       - name: Run Checkov (Terraform)
-        uses: bridgecrewio/checkov-action@v12.3122.0
+        uses: bridgecrewio/checkov-action@v12.3123.0
         with:
           # Repo root so org-observability/'s .tf files (and any future
           # dashboard) are covered without a CI change.
