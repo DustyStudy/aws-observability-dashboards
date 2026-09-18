@@ -23,6 +23,13 @@ data "aws_region" "current" {}
 # other six dashboards in this repo.
 # -----------------------------------------------------------------------
 locals {
+  # With no member_account_ids the dashboard queries every account linked to
+  # this monitoring account through CloudWatch Metrics Insights
+  # (SELECT ... GROUP BY AWS.AccountId) instead of listing accounts one by
+  # one, so it is not bound by the per-widget metric limit. With a list, it
+  # keeps the explicit per-account approach below.
+  all_accounts = length(var.member_account_ids) == 0
+
   metric_specs = {
     stale_keys     = { metric_name = "StaleAccessKeys", stat = "Maximum", id_prefix = "sk", label = "Stale Access Keys (org-wide)" }
     no_mfa         = { metric_name = "UsersWithoutMfa", stat = "Maximum", id_prefix = "mfa", label = "Users Without MFA (org-wide)" }
@@ -49,15 +56,32 @@ locals {
   }
 
   metric_group_totals = {
-    for key, spec in local.metric_specs : key => [[{
-      expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
-      label      = spec.label
-      id         = "total_${spec.id_prefix}"
-    }]]
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+      }] if !local.all_accounts
+    ]
+  }
+
+  metric_group_insights = {
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "SELECT SUM(${spec.metric_name}) FROM SCHEMA(\"${var.metric_namespace}\")"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+        period     = 86400
+      }] if local.all_accounts
+    ]
   }
 
   metric_groups = {
-    for key, spec in local.metric_specs : key => concat(local.metric_group_accounts[key], local.metric_group_totals[key])
+    for key, spec in local.metric_specs : key => concat(
+      local.metric_group_accounts[key],
+      local.metric_group_totals[key],
+      local.metric_group_insights[key],
+    )
   }
 
   # The "Workload Identity Providers" single-value widget shows one number
@@ -77,23 +101,34 @@ locals {
   ]
   identity_provider_single_value_metrics = concat(
     local.identity_provider_hidden_oidc,
-    [[{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "pio${i}"])}])", id = "pio_total", visible = false }]],
+    [for _ in [1] : [{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "pio${i}"])}])", id = "pio_total", visible = false }] if !local.all_accounts],
     local.identity_provider_hidden_saml,
-    [[{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "pis${i}"])}])", id = "pis_total", visible = false }]],
+    [for _ in [1] : [{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "pis${i}"])}])", id = "pis_total", visible = false }] if !local.all_accounts],
+    [for _ in [1] : [{ expression = "SELECT SUM(OidcProviders) FROM SCHEMA(\"${var.metric_namespace}\")", id = "pio_total", visible = false, period = 86400 }] if local.all_accounts],
+    [for _ in [1] : [{ expression = "SELECT SUM(SamlProviders) FROM SCHEMA(\"${var.metric_namespace}\")", id = "pis_total", visible = false, period = 86400 }] if local.all_accounts],
     [[{ expression = "pio_total+pis_total", label = "Identity Providers (org-wide)", id = "provider_total" }]]
   )
 
   # Secrets Manager is genuinely multi-dimensional per account (it breaks
   # out by Region within each account), so this one stays as one SEARCH
   # expression per account rather than collapsing to a single sum.
-  secrets_by_account_region_metrics = [
-    for i, acct in var.member_account_ids : [{
-      expression = "SEARCH('{${var.metric_namespace},Region} MetricName=\"SecretsWithoutRotation\"', 'Maximum', 86400)"
-      id         = "sec${i}"
-      accountId  = acct
-      label      = "${acct} - $${PROP('Dim.Region')}"
-    }]
-  ]
+  secrets_by_account_region_metrics = concat(
+    [
+      for i, acct in var.member_account_ids : [{
+        expression = "SEARCH('{${var.metric_namespace},Region} MetricName=\"SecretsWithoutRotation\"', 'Maximum', 86400)"
+        id         = "sec${i}"
+        accountId  = acct
+        label      = "${acct} - $${PROP('Dim.Region')}"
+      }]
+    ],
+    [
+      for _ in [1] : [{
+        expression = "SELECT SUM(SecretsWithoutRotation) FROM SCHEMA(\"${var.metric_namespace}\", Region) GROUP BY AWS.AccountId, Region"
+        id         = "sec_all"
+        period     = 86400
+      }] if local.all_accounts
+    ],
+  )
 }
 
 resource "aws_cloudwatch_dashboard" "nhi_governance_org" {
