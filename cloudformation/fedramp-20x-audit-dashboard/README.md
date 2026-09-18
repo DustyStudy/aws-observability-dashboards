@@ -18,8 +18,8 @@ It does this two ways:
    ACM certificate expiry, S3 secure-transport policies, a Security Hub
    pass/fail score, account-wide Inspector findings (not just EKS/ECR), EC2
    instance-profile coverage, and Trusted Advisor security-check status
-   where the support plan allows it — 26 metrics across 12 AWS services,
-   none of which the other six dashboards in this repo already cover.
+   where the support plan allows it — 35 metrics across 15 AWS services,
+   none of which the other seven dashboards in this repo already cover.
 2. **Reuses the other dashboards' existing metrics.** MFA/stale-credential
    checks, open security groups and public-facing resources, and Security
    Hub/GuardDuty finding *counts* are already collected by
@@ -50,7 +50,7 @@ Also required:
 - Permissions to create: KMS key + alias, SQS queue, Lambda function + IAM
   role, EventBridge schedule rule, CloudWatch Logs group, CloudWatch
   dashboard
-- The collector's role needs read-only access across sixteen services —
+- The collector's role needs read-only access across fifteen services —
   Config (`config:Describe*`), CloudTrail (`cloudtrail:DescribeTrails`,
   `cloudtrail:GetTrailStatus`), Backup (`backup:List*`), Access Analyzer
   (`access-analyzer:List*`), RDS (`rds:DescribeDBInstances`), Auto Scaling

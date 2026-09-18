@@ -169,7 +169,7 @@ Both run in CI on every push/PR (the `lambda-tests` job).
   account**, which some locked-down or FedRAMP-boundary AWS Organizations
   restrict. If that's your environment, expect to adapt the org-dashboard
   deployment step rather than run it as-is.
-- **Only 2 of 7 dashboards have a finished org-wide version** today (see
+- **Only 3 of 8 dashboards have a finished org-wide version** today (see
   the "Org-wide" column above) — the rest have the per-account collector
   half ready but need their central org-dashboard built.
 

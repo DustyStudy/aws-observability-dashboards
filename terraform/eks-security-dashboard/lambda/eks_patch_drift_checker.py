@@ -28,7 +28,7 @@ def _put_metric(cloudwatch, name, value, dimensions=None):
         "MetricName": name,
         "Value": float(value),
         "Unit": "Count",
-        "Timestamp": datetime.datetime.utcnow(),
+        "Timestamp": datetime.datetime.now(datetime.timezone.utc),
     }
     if dimensions:
         datum["Dimensions"] = dimensions
@@ -93,9 +93,9 @@ def lambda_handler(event, context):
                     try:
                         release_date = datetime.datetime.strptime(
                             date_str, "%Y%m%d"
-                        )
+                        ).replace(tzinfo=datetime.timezone.utc)
                         age_days = (
-                            datetime.datetime.utcnow() - release_date
+                            datetime.datetime.now(datetime.timezone.utc) - release_date
                         ).days
                         if age_days > STALE_AMI_DAYS:
                             stale_ami_nodegroups += 1

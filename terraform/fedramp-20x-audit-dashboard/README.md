@@ -35,10 +35,19 @@ override theirs either.
 
 ## Deploy — org-wide
 
-1. Deploy this module's collector (via your own StackSets-equivalent
+1. Deploy the `collector` submodule (via your own StackSets-equivalent
    multi-account deployment approach — Terraform has no native StackSets
    primitive) to every member account, alongside the collectors for the
-   three prerequisite modules.
+   three prerequisite modules:
+
+```hcl
+module "fedramp_20x_audit_collector" {
+  source = "./terraform/fedramp-20x-audit-dashboard/collector"
+
+  name_prefix = "fedramp-20x-audit"
+}
+```
+
 2. Deploy the `org-dashboard` submodule once, in your central monitoring
    account:
 
