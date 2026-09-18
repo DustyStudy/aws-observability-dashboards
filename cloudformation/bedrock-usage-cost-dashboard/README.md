@@ -88,6 +88,44 @@ org-dashboard in a central monitoring account. See
 [`../../org-observability/README.md`](../../org-observability/README.md) for
 the full background (OAM Sink/Link setup, StackSets prerequisites).
 
+`org-dashboard.yaml` has two modes, chosen by the `MemberAccountIds` parameter:
+
+- **All accounts (default, `MemberAccountIds` left empty)**: each widget is a
+  CloudWatch Metrics Insights query over every account linked to the
+  monitoring account,
+  for example `SELECT SUM(Invocations) FROM SCHEMA("AWS/Bedrock", ModelId)`.
+  The by-account and by-model panels add `GROUP BY AWS.AccountId, ...`. There
+  is no account list to maintain and no per-widget account ceiling.
+- **Explicit list (`MemberAccountIds=111111111111,222222222222`)**: one metric per account
+  per series, limited to roughly 500/(series+1) accounts per widget. This is
+  the behavior the dashboard had before all-accounts mode existed, unchanged.
+
+All-accounts mode is new and has **not been verified against a live AWS
+Organization**. Things to know before relying on it:
+
+- Metrics Insights returns at most 500 time series per query. Totals (the
+  queries without `GROUP BY`) are unaffected, but the per-account and
+  per-model breakdowns are truncated beyond that. Those three queries use
+  `ORDER BY SUM() DESC LIMIT 500`, so what is kept is the top 500 series by
+  value rather than an arbitrary subset; lower the `LIMIT` if a panel with
+  hundreds of series is unreadable.
+- Each cost total is a `SUM` over the period (86400 s). The cost collector
+  publishes once per run (`rate(1 day)` by default) and each value is a
+  gauge: the previous day's Bedrock cost for that account, timestamped at
+  publish time. Summing is therefore correct only while every account
+  publishes at most once per day; if the collector runs more often (or is
+  redeployed, triggering an extra run in the same UTC day), that account is
+  counted more than once for the period. Explicit-list mode is not affected,
+  because it takes the per-account `Maximum` before adding accounts up. Cost
+  Explorer data lags 24-48 hours, so a shorter schedule buys nothing.
+- `AVG` latency in Metrics Insights is taken over all matched observations
+  (every account and model together). Explicit-list mode instead averages the
+  per-account, per-model averages with equal weight, so the two modes can
+  differ when traffic is uneven.
+- The queries also include any metrics the monitoring account itself
+  publishes (its own Bedrock usage and, if it runs a collector, its cost).
+- Use the explicit list to restrict the dashboard to specific accounts.
+
 1. **Collector via StackSets.** Deploy `collector.yaml` (this folder) to every
    member account. It is the single-account stack minus the dashboard, so each
    account publishes its own `EstimatedDailyCostUSD` metric locally:
@@ -104,16 +142,18 @@ the full background (OAM Sink/Link setup, StackSets prerequisites).
 3. **Deploy the org-dashboard once**, in the monitoring account, after the
    collectors have run at least once:
    ```bash
-   aws cloudformation deploy      --template-file org-dashboard.yaml      --stack-name bedrock-usage-cost-org-dashboard      --parameter-overrides MemberAccountIds=111111111111,222222222222,333333333333      --capabilities CAPABILITY_NAMED_IAM      --region us-east-1
+   aws cloudformation deploy      --template-file org-dashboard.yaml      --stack-name bedrock-usage-cost-org-dashboard      --capabilities CAPABILITY_NAMED_IAM      --region us-east-1
    ```
+   This covers every linked account. To restrict it to specific accounts, add
+   `--parameter-overrides MemberAccountIds=111111111111,222222222222,333333333333`.
 
 ### Org-dashboard parameters
 
 | Parameter | Default | Description |
 |---|---|---|
 | `DashboardName` | `bedrock-usage-cost-org-dashboard` | Name of the cross-account CloudWatch dashboard |
-| `MemberAccountIds` | (required) | Comma-delimited member account IDs to include (the accounts you deployed the collector and OAM Link to) |
-| `MetricNamespace` | `BedrockCostObservability` | Must match the `MetricNamespace` used for `collector.yaml` in every member account |
+| `MemberAccountIds` | empty | Empty = every account linked to the monitoring account (Metrics Insights queries); otherwise comma-delimited 12-digit account IDs to include, one metric per account |
+| `MetricNamespace` | `BedrockCostObservability` | Must match the `MetricNamespace` used for `collector.yaml` in every member account (letters, numbers, `_`, `.`, `/`, `-` only) |
 | `LogRetentionDays` | `365` | Retention for the dashboard-generator Lambda's own log group |
 
 The stack uses a Lambda-backed custom resource to render the `DashboardBody`
@@ -123,24 +163,26 @@ dashboard, reserved concurrency of 1 and X-Ray tracing.
 
 ### Widgets
 
-| Widget | Combine across accounts |
-|---|---|
-| Bedrock Invocations (org-wide) | `SUM` |
-| Bedrock Invocations by Model and Account | one `SEARCH` per account, stacked, labelled `<account> - <model>` |
-| Bedrock Token Volume (Input vs Output, org-wide) | `SUM` |
-| Bedrock Invocation Latency (org-wide, avg ms) | `AVG` (never `SUM`) |
-| Bedrock Errors & Throttles (org-wide) | `SUM` |
-| Estimated Total Daily Cost (org-wide, USD) | `SUM` of every account's `TOTAL` series |
-| Estimated Daily Cost by Usage Type and Account | one `SEARCH` per account, labelled `<account> - <usage type>` |
-| Estimated Daily Cost per Account (USD) | each account's own `TOTAL` series side by side (cost attribution) |
+| Widget | All accounts (default) | Explicit list |
+|---|---|---|
+| Bedrock Invocations (org-wide) | `SELECT SUM(Invocations) FROM SCHEMA("AWS/Bedrock", ModelId)` | `SUM` of one `SEARCH` per account |
+| Bedrock Invocations by Model and Account | `... GROUP BY AWS.AccountId, ModelId ORDER BY SUM() DESC LIMIT 500`, stacked | one `SEARCH` per account, stacked, labelled `<account> - <model>` |
+| Bedrock Token Volume (Input vs Output, org-wide) | `SUM(InputTokenCount)` and `SUM(OutputTokenCount)` queries | `SUM` |
+| Bedrock Invocation Latency (org-wide, avg ms) | `SELECT AVG(InvocationLatency) FROM SCHEMA("AWS/Bedrock", ModelId)` | `AVG` (never `SUM`) |
+| Bedrock Errors & Throttles (org-wide) | `SUM(InvocationClientErrors)`, `SUM(InvocationServerErrors)`, `SUM(InvocationThrottles)` queries | `SUM` |
+| Estimated Total Daily Cost (org-wide, USD) | `SELECT SUM(EstimatedDailyCostUSD) FROM SCHEMA("<namespace>", UsageType) WHERE UsageType = 'TOTAL'` | `SUM` of every account's `TOTAL` series |
+| Estimated Daily Cost by Usage Type and Account | `... GROUP BY AWS.AccountId, UsageType ORDER BY SUM() DESC LIMIT 500` | one `SEARCH` per account, labelled `<account> - <usage type>` |
+| Estimated Daily Cost per Account (USD) | `... WHERE UsageType = 'TOTAL' GROUP BY AWS.AccountId ORDER BY SUM() DESC LIMIT 500` | each account's own `TOTAL` series side by side (cost attribution) |
 
 Native `AWS/Bedrock` metrics (invocations, tokens, latency, errors,
 throttles) need **no collector** in the member accounts, only the OAM Link.
 Only the three cost widgets depend on the collector.
 
-### Limitation: metrics per widget
+### Limitation: metrics per widget (explicit-list mode)
 
-CloudWatch allows at most 500 metrics per widget, and this pattern uses one
+This applies only when `MemberAccountIds` is non-empty; all-accounts mode is
+not bound by it (see the 500-series-per-query note above). CloudWatch allows
+at most 500 metrics per widget, and this pattern uses one
 metric per account per series (plus one combining expression per series). A
 widget with `S` series therefore needs `S x (accounts + 1)` metrics, so it
 supports roughly `500 / (S + 1)` accounts as a safe rule of thumb. The widest

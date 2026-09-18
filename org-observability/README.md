@@ -117,9 +117,11 @@ intact at any scale.
      --capabilities CAPABILITY_NAMED_IAM \
      --region us-east-1
    ```
-   Terraform users: apply `terraform/nhi-governance-dashboard/org-dashboard/`
-   directly (`member_account_ids` variable), no StackSets needed for this
-   one piece since it only deploys once.
+   `MemberAccountIds` is optional: leave it out to show every linked
+   account (all-accounts mode, see below), or list account IDs to show only
+   those. Terraform users: apply `terraform/nhi-governance-dashboard/org-dashboard/`
+   directly (`member_account_ids` variable, empty by default), no StackSets
+   needed for this one piece since it only deploys once.
    Every other dashboard follows the same layout: `org-dashboard.yaml` in
    its `cloudformation/<dashboard>/` folder and an `org-dashboard/` module
    in its `terraform/<dashboard>/` folder. Check each dashboard's README for
@@ -217,20 +219,27 @@ The remaining five follow those patterns:
 - Cross-account metric retrieval has no additional CloudWatch charge
   beyond standard pricing, but counts toward the monitoring account's API
   call quotas — keep an eye on this with very large organizations.
-- CloudWatch caps a metric widget at 500 metrics and a dashboard at 500
-  widgets. The dashboard schema takes one `accountId` per metric entry
-  (there is no "all accounts" value), so every org-dashboard here lists
-  member accounts explicitly and uses one metric per account per series.
-  A widget with S series therefore supports roughly 500/(S+1) accounts, and
-  dashboards with per-account log panels are capped lower still (each
-  dashboard's README and its variable validation give the exact figure).
-- `nhi-governance-dashboard` also offers an experimental all-accounts mode
-  (leave its account list empty) that uses CloudWatch Metrics Insights
-  queries with `GROUP BY AWS.AccountId` instead of listing accounts, which
-  avoids the per-widget account ceiling. It has not been verified against a
-  live organization yet; see that dashboard's README for its caveats.
-- StackSets and OAM themselves scale to 100,000 source accounts per sink,
-  but a single dashboard's widget math does not. For large organizations,
-  deploy the same org-dashboard several times with different
+- **All-accounts mode (default).** With no account list, every
+  org-dashboard uses CloudWatch Metrics Insights queries over all accounts
+  linked to the monitoring account (`SELECT ... FROM SCHEMA(...)`, with
+  `GROUP BY AWS.AccountId` where a per-account breakdown is shown), so no
+  per-widget account ceiling applies. This mode is new and has **not been
+  verified against a live organization**. Queries return at most 500 time
+  series, so per-account breakdowns truncate beyond that (totals don't).
+  Totals are sums over the period, which assumes each collector publishes
+  at most once per period (default schedule: daily). Log panels
+  (security-posture, network-exposure, eks-security) cannot be queried this
+  way, so they stay per-account and are driven by a separate log account
+  list (`log_account_ids` / `LogAccountIds`); with none set they are
+  omitted. Each dashboard's README lists its exact queries and caveats.
+- **Explicit account list.** Passing account IDs restores the original
+  behavior: one metric per account per series. CloudWatch caps a metric
+  widget at 500 metrics and a dashboard at 500 widgets, so a widget with S
+  series supports roughly 500/(S+1) accounts, and dashboards with
+  per-account log panels are capped lower still (each dashboard's README and
+  its variable validation give the exact figure).
+- StackSets and OAM themselves scale to 100,000 source accounts per sink.
+  To split a very large organization, or restrict a dashboard to certain
+  accounts, deploy the same org-dashboard several times with different
   `DashboardName` and `MemberAccountIds` (`member_account_ids`) subsets,
   for example one per business unit or OU.

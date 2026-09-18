@@ -109,6 +109,42 @@ you didn't override theirs either.
    see [`../../org-observability/README.md`](../../org-observability/README.md)
    for the OAM Sink/Link setup this depends on.
 
+`org-dashboard.yaml` has two modes, chosen by the `MemberAccountIds` parameter:
+
+- **All accounts (default, `MemberAccountIds` left empty)**: each widget is a
+  CloudWatch Metrics Insights query over every account linked to the
+  monitoring account, for example
+  `SELECT SUM(ConfigRulesNonCompliant) FROM SCHEMA("FedRAMP20xAudit")`.
+  The network-exposure metrics are Region-dimensioned, so they use
+  `SCHEMA("NetworkExposure", Region)` (summed across regions), and the Open
+  Security Group Rules panel adds `GROUP BY AWS.AccountId, Region`. The
+  Security Hub standards score is a percentage, so it uses
+  `AVG(SecurityHubStandardsScorePercent)` across accounts instead of `SUM`.
+  There is no account list to maintain and no per-widget account ceiling.
+- **Explicit list (`MemberAccountIds=111111111111,222222222222`)**: one
+  metric per account per series, limited to roughly 500/(series+1) accounts
+  per widget. This is the behavior the dashboard had before all-accounts
+  mode existed.
+
+All-accounts mode is new and has **not been verified against a live AWS
+Organization**. Things to know before relying on it:
+
+- Metrics Insights returns at most 500 time series per query; totals are
+  unaffected, but the per-account Open Security Group Rules breakdown is
+  truncated beyond that.
+- Each total is a `SUM` over the period (86400 s). This dashboard's
+  collector publishes each metric once per schedule (`rate(1 day)` by
+  default; the multi-region collector publishes a single account-wide value
+  per metric with the Region merged), so this is correct as long as the
+  schedule is not shorter than one day; a shorter schedule would count an
+  account more than once per period. The same applies to the
+  nhi-governance, network-exposure and security-posture collectors whose
+  metrics this dashboard also reads. The security-posture finding counts are
+  event counts, so their `SUM` over the period is exact.
+- The queries also include any metrics the monitoring account itself
+  publishes in these namespaces.
+- Use the explicit list to restrict the dashboard to specific accounts.
+
 `CAPABILITY_NAMED_IAM` is required because these stacks create named IAM
 roles.
 

@@ -23,11 +23,13 @@ Parameters:
 
   MemberAccountIds:
     Type: CommaDelimitedList
+    Default: ""
     Description: >-
-      Every member account ID whose AI-service-inventory collector metrics
-      should appear on this dashboard (the same accounts you deployed
-      collector.yaml and the OAM Link to). Does not need to include the
-      monitoring account itself unless it also runs its own collector.
+      Leave empty (the default) to show every account linked to this
+      monitoring account, using CloudWatch Metrics Insights queries that
+      group by account. Or list specific 12-digit account IDs to show only
+      those, one metric per account (limited to roughly 500/(series+1)
+      accounts per widget).
 
   MetricNamespace:
     Type: String
@@ -173,6 +175,7 @@ Resources:
       Code:
         ZipFile: |
           import json
+          import re
           import urllib.request
 
           import boto3
@@ -208,6 +211,12 @@ Resources:
           # "accountId", plus one visible SUM() expression). The schema is
           # always {namespace,Service,Region}: the collector's metrics carry
           # both dimensions, so a Region-only schema would match nothing.
+          #
+          # With no account IDs (all-accounts mode) each widget is instead
+          # one CloudWatch Metrics Insights query over every account linked
+          # to this monitoring account, e.g.
+          # SELECT SUM(ServiceActive) FROM SCHEMA("<ns>", Service, Region)
+          # GROUP BY Service, so there is no per-widget account ceiling.
           # ---------------------------------------------------------------
 
           # (Service dimension value, display title, metric-math id prefix)
@@ -228,7 +237,26 @@ Resources:
               return f"SEARCH('{schema}', 'Maximum', 86400)"
 
 
+          def _insights(namespace, where="", tail=""):
+              # Metrics Insights query over the ServiceActive metric; SCHEMA
+              # must list the metric's exact dimension set (Service, Region).
+              return (
+                  f'SELECT SUM(ServiceActive) FROM SCHEMA("{namespace}", Service, Region)'
+                  f"{where}{tail}"
+              )
+
+
           def _sum_across_accounts(namespace, account_ids, label, service=None, id_prefix="m"):
+              if not account_ids:
+                  # All-accounts mode: one query summing over every linked
+                  # account (and, without a service, every service/region).
+                  where = f" WHERE Service = '{service}'" if service else ""
+                  return [[{
+                      "expression": _insights(namespace, where=where),
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": 86400,
+                  }]]
               # Hidden per-account "active regions" count + one visible SUM().
               entries = []
               ids = []
@@ -262,9 +290,17 @@ Resources:
           def _service_totals_widget(x, y, w, h, namespace, account_ids, region):
               # One group per service; distinct id prefixes keep the six
               # N-account groups from colliding inside this one widget.
-              metrics = []
-              for service, title, prefix in SERVICES:
-                  metrics.extend(_sum_across_accounts(namespace, account_ids, title, service=service, id_prefix=prefix))
+              if not account_ids:
+                  # All-accounts mode: one series per Service value (the
+                  # collector publishes exactly the services above).
+                  metrics = [[{
+                      "expression": _insights(namespace, tail=" GROUP BY Service"),
+                      "id": "svc_all", "period": 86400,
+                  }]]
+              else:
+                  metrics = []
+                  for service, title, prefix in SERVICES:
+                      metrics.extend(_sum_across_accounts(namespace, account_ids, title, service=service, id_prefix=prefix))
               return {
                   "type": "metric", "x": x, "y": y, "width": w, "height": h,
                   "properties": {
@@ -276,6 +312,16 @@ Resources:
 
           def _pairs_by_account_widget(x, y, w, h, namespace, account_ids, region):
               metrics = []
+              if not account_ids:
+                  # All-accounts mode: one series per account, largest first.
+                  # Metrics Insights returns at most 500 series per query and
+                  # a bar chart of that many accounts is unreadable, so keep
+                  # the 100 accounts with the most active service/region
+                  # pairs. The org-wide totals are not affected by this limit.
+                  metrics.append([{
+                      "expression": _insights(namespace, tail=" GROUP BY AWS.AccountId ORDER BY SUM() DESC LIMIT 100"),
+                      "id": "ac_all", "period": 86400,
+                  }])
               for i, acct in enumerate(account_ids):
                   metrics.append([{
                       "expression": f"SUM({_active_search(namespace)})",
@@ -294,6 +340,18 @@ Resources:
               # One SEARCH per account: which regions in which accounts use
               # this service.
               metrics = []
+              if not account_ids:
+                  # All-accounts mode: one series per region holding the
+                  # number of accounts using the service there. Grouping by
+                  # Region only keeps the query far below the 500-series
+                  # limit; the per-account view is the "by Account" widget.
+                  metrics.append([{
+                      "expression": _insights(namespace, where=f" WHERE Service = '{service}'", tail=" GROUP BY Region"),
+                      "id": f"{prefix}_all", "period": 86400,
+                  }])
+                  title = f"{title} \u2014 Accounts Using It, by Region"
+              else:
+                  title = f"{title} \u2014 Active by Account/Region"
               for i, acct in enumerate(account_ids):
                   metrics.append([{
                       "expression": _active_search(namespace, service),
@@ -303,7 +361,7 @@ Resources:
               return {
                   "type": "metric", "x": x, "y": y, "width": w, "height": h,
                   "properties": {
-                      "title": f"{title} \u2014 Active by Account/Region",
+                      "title": title,
                       "view": "bar", "region": region, "metrics": metrics,
                   },
               }
@@ -331,9 +389,15 @@ Resources:
               try:
                   if request_type in ("Create", "Update"):
                       namespace = props.get("MetricNamespace", "AIServiceInventory")
-                      account_ids = props["MemberAccountIds"]
+                      account_ids = props.get("MemberAccountIds", [])
                       if isinstance(account_ids, str):
                           account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      account_ids = [a for a in account_ids if a]
+                      if not re.fullmatch(r"[A-Za-z0-9_./-]+", namespace):
+                          raise ValueError("MetricNamespace may only contain letters, numbers, underscores, dots, slashes, and hyphens")
+                      for a in account_ids:
+                          if not re.fullmatch(r"[0-9]{12}", a):
+                              raise ValueError(f"Invalid account ID: {a!r}")
                       region = props.get("Region") or context.invoked_function_arn.split(":")[3]
 
                       body = build_dashboard_body(namespace, account_ids, region)

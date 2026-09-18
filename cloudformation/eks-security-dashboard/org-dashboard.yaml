@@ -10,9 +10,11 @@ Description: >
 
   CloudFormation can't loop-generate JSON inside a DashboardBody string, so a
   small Lambda-backed custom resource renders the dashboard from the member
-  account IDs. Metric widgets sum each count across accounts; the GuardDuty
-  and Inspector Logs Insights panels take a single accountId, so each member
-  account gets its own pair of panels.
+  account IDs. Metric widgets sum each count across accounts (with no
+  MemberAccountIds, one CloudWatch Metrics Insights query per widget over
+  every linked account); the GuardDuty and Inspector Logs Insights panels
+  take a single accountId, so each account in LogAccountIds (or, if that is
+  empty, in MemberAccountIds) gets its own pair of panels.
 
 Parameters:
   DashboardName:
@@ -26,13 +28,28 @@ Parameters:
 
   MemberAccountIds:
     Type: CommaDelimitedList
+    Default: ""
     Description: >-
-      Every member account ID whose EKS security collector metrics and finding
-      logs should appear on this dashboard (the same accounts you deployed
-      collector.yaml and the OAM Link to). Does not need to include the
-      monitoring account itself unless it also runs its own collector. Each
-      account adds two log widgets, so at most 246 accounts fit on one
-      dashboard (500-widget limit); split larger orgs across several stacks.
+      Leave empty (the default) to show the metric tiles for every account
+      linked to this monitoring account, using CloudWatch Metrics Insights
+      queries. Or list specific 12-digit account IDs to show only those, one
+      metric per account (at most 499 accounts, since each widget also holds
+      one SUM expression within the 500-metric limit). When LogAccountIds is
+      empty, this list also decides which accounts get GuardDuty and
+      Inspector log panels (see LogAccountIds for the limit).
+
+  LogAccountIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      12-digit IDs of the accounts that get GuardDuty and Inspector log
+      panels. A Logs Insights widget can only query one account, so log panels
+      cannot be generated for "all accounts": list the accounts you want here.
+      If empty (the default), log panels are created for MemberAccountIds; in
+      all-accounts mode (MemberAccountIds also empty) no log panels are
+      created. Each account adds two log widgets, so at most 246 accounts fit
+      on one dashboard (500-widget limit); split larger orgs across several
+      stacks.
 
   MetricNamespace:
     Type: String
@@ -203,11 +220,15 @@ Resources:
 
           # A dashboard holds at most 500 widgets; this dashboard uses
           # FIXED_WIDGETS (header, 6 metric widgets, log-section note) plus
-          # 2 log widgets (GuardDuty + Inspector) per member account.
+          # 2 log widgets (GuardDuty + Inspector) per log account.
           MAX_WIDGETS = 500
           FIXED_WIDGETS = 8
           LOG_WIDGETS_PER_ACCOUNT = 2
           MAX_ACCOUNTS = (MAX_WIDGETS - FIXED_WIDGETS) // LOG_WIDGETS_PER_ACCOUNT
+
+          # Explicit mode only: a metric widget holds one hidden metric per
+          # account plus one SUM() expression and is limited to 500 metrics.
+          MAX_METRIC_ACCOUNTS = 499
 
           ACCOUNT_ID_RE = re.compile(r"^[0-9]{12}$")
 
@@ -236,11 +257,22 @@ Resources:
           # per-account metric entry (each carrying its own "accountId")
           # plus one visible SUM() expression — the general recipe for "org
           # rollup" widgets. See ../../org-observability/README.md.
+          # With no account list, one Metrics Insights query spans every
+          # account linked to this monitoring account instead.
           # Each widget below shows exactly one group, so the per-widget
           # metric ids only need distinct prefixes between widgets to stay
           # readable; they are also unique within each widget.
           # ---------------------------------------------------------------
           def _sum_across_accounts(namespace, metric_name, account_ids, label, stat="Maximum", period=86400, id_prefix="m"):
+              if not account_ids:
+                  # All-accounts mode. The collector publishes these counts
+                  # without dimensions, hence SCHEMA("<namespace>") alone.
+                  return [[{
+                      "expression": f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}")',
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": period,
+                  }]]
               entries = []
               ids = []
               for i, acct in enumerate(account_ids):
@@ -272,7 +304,7 @@ Resources:
           # ---------------------------------------------------------------
           # Log widgets. A Logs Insights widget takes ONE accountId, so it
           # cannot collapse across accounts the way metrics can: emit one
-          # widget per member account per log panel instead.
+          # widget per log account per log panel instead.
           # ---------------------------------------------------------------
           def _log_widget(x, y, w, h, title, account_id, region, query):
               return {
@@ -284,24 +316,43 @@ Resources:
               }
 
 
-          def _normalize_account_ids(account_ids):
-              cleaned = [str(a).strip() for a in account_ids if str(a).strip()]
-              if not cleaned:
-                  raise ValueError("MemberAccountIds must contain at least one account ID")
+          def _normalize_account_ids(account_ids, param_name, max_accounts, limit_reason):
+              cleaned = [str(a).strip() for a in (account_ids or []) if str(a).strip()]
               bad = [a for a in cleaned if not ACCOUNT_ID_RE.match(a)]
               if bad:
-                  raise ValueError(f"MemberAccountIds must be 12-digit account IDs, got: {bad}")
-              if len(cleaned) > MAX_ACCOUNTS:
+                  raise ValueError(f"{param_name} must be 12-digit account IDs, got: {bad}")
+              if len(cleaned) > max_accounts:
                   raise ValueError(
-                      f"{len(cleaned)} accounts would need more than {MAX_WIDGETS} dashboard widgets "
-                      f"(2 log widgets per account, max {MAX_ACCOUNTS} accounts); split the accounts "
-                      "across several org-dashboard stacks with different DashboardName values"
+                      f"{len(cleaned)} accounts in {param_name} exceeds the limit of {max_accounts} "
+                      f"({limit_reason}); split the accounts across several org-dashboard stacks "
+                      "with different DashboardName values"
                   )
               return cleaned
 
 
-          def build_dashboard_body(namespace, collector_name, account_ids, region):
-              account_ids = _normalize_account_ids(account_ids)
+          def build_dashboard_body(namespace, collector_name, account_ids, region, log_account_ids=None):
+              # account_ids empty = all-accounts mode (Metrics Insights queries);
+              # non-empty = one metric per listed account. Log panels go to
+              # log_account_ids if given, else to account_ids (none if both empty).
+              account_ids = _normalize_account_ids(
+                  account_ids, "MemberAccountIds", MAX_METRIC_ACCOUNTS,
+                  "one hidden metric per account plus one SUM expression must fit the 500-metric widget limit")
+              log_ids = _normalize_account_ids(
+                  log_account_ids, "LogAccountIds", MAX_ACCOUNTS,
+                  f"{LOG_WIDGETS_PER_ACCOUNT} log widgets per account within the {MAX_WIDGETS}-widget dashboard limit")
+              if log_ids:
+                  log_accounts = log_ids
+                  log_source = "LogAccountIds"
+              else:
+                  log_accounts = account_ids
+                  log_source = "MemberAccountIds (LogAccountIds is empty)"
+              if len(log_accounts) > MAX_ACCOUNTS:
+                  raise ValueError(
+                      f"{len(log_accounts)} accounts in {log_source} would need more than {MAX_WIDGETS} dashboard "
+                      f"widgets ({LOG_WIDGETS_PER_ACCOUNT} log widgets per account, max {MAX_ACCOUNTS} accounts); "
+                      "set LogAccountIds to at most that many accounts, or split the accounts across several "
+                      "org-dashboard stacks with different DashboardName values"
+                  )
               guardduty_log_group = f"/aws/events/{collector_name}/guardduty-eks"
               inspector_log_group = f"/aws/events/{collector_name}/inspector-images"
               guardduty_query = (
@@ -313,15 +364,43 @@ Resources:
                   "detail.resources.0.details.awsEcrContainerImage.repositoryName | sort @timestamp desc | limit 50"
               )
 
+              if not account_ids:
+                  header = (
+                      "## EKS Security Dashboard (org-wide)\n"
+                      "GuardDuty EKS Protection findings, Inspector container image vulnerabilities, and "
+                      "Kubernetes version/AMI patch drift across all clusters and nodegroups in every account "
+                      "linked to this monitoring account. Counts are summed across accounts; finding logs are "
+                      "shown per account only for the accounts listed in LogAccountIds."
+                  )
+              else:
+                  header = (
+                      "## EKS Security Dashboard (org-wide)\n"
+                      "GuardDuty EKS Protection findings, Inspector container image vulnerabilities, and "
+                      f"Kubernetes version/AMI patch drift across all clusters and nodegroups in {len(account_ids)} "
+                      "member account(s). Counts are summed across accounts; finding logs are shown per account."
+                  )
+              if log_ids:
+                  log_note = (
+                      "### Findings by account\n"
+                      "A Logs Insights widget can only query one account, so each account in LogAccountIds has "
+                      "its own GuardDuty (left) and Inspector (right) panel."
+                  )
+              elif not account_ids:
+                  log_note = (
+                      "### Findings by account\n"
+                      "A Logs Insights widget can only query one account, so it cannot cover all accounts at "
+                      "once. No GuardDuty or Inspector panels are shown: set LogAccountIds to the 12-digit IDs "
+                      "of the accounts to show, and each gets its own GuardDuty (left) and Inspector (right) panel."
+                  )
+              else:
+                  log_note = (
+                      "### Findings by member account\n"
+                      "A Logs Insights widget can only query one account, so each member account has its own "
+                      "GuardDuty (left) and Inspector (right) panel."
+                  )
+
               widgets = [
-                  {"type": "text", "x": 0, "y": 0, "width": 24, "height": 2, "properties": {
-                      "markdown": (
-                          "## EKS Security Dashboard (org-wide)\n"
-                          "GuardDuty EKS Protection findings, Inspector container image vulnerabilities, and "
-                          f"Kubernetes version/AMI patch drift across all clusters and nodegroups in {len(account_ids)} "
-                          "member account(s). Counts are summed across accounts; finding logs are shown per account."
-                      ),
-                  }},
+                  {"type": "text", "x": 0, "y": 0, "width": 24, "height": 2, "properties": {"markdown": header}},
                   _metric_widget(0, 2, 8, 6, "Clusters with Version Drift (org-wide)", "timeSeries", namespace,
                                  "ClusterVersionDriftCount", account_ids, region, "Maximum", "vd"),
                   _metric_widget(8, 2, 8, 6, "Nodegroups Needing Version Update (org-wide)", "timeSeries", namespace,
@@ -334,17 +413,11 @@ Resources:
                                  "PublicOnlyEndpointClusters", account_ids, region, "Maximum", "po"),
                   _metric_widget(16, 8, 8, 6, "Clusters Scanned (org-wide, last run)", "singleValue", namespace,
                                  "ClustersScanned", account_ids, region, "Maximum", "cs"),
-                  {"type": "text", "x": 0, "y": 14, "width": 24, "height": 2, "properties": {
-                      "markdown": (
-                          "### Findings by member account\n"
-                          "A Logs Insights widget can only query one account, so each member account has its own "
-                          "GuardDuty (left) and Inspector (right) panel."
-                      ),
-                  }},
+                  {"type": "text", "x": 0, "y": 14, "width": 24, "height": 2, "properties": {"markdown": log_note}},
               ]
 
-              # One row per account: GuardDuty on the left, Inspector on the right.
-              for i, acct in enumerate(account_ids):
+              # One row per log account: GuardDuty on the left, Inspector on the right.
+              for i, acct in enumerate(log_accounts):
                   y = 16 + 8 * i
                   widgets.append(_log_widget(0, y, 12, 8, "GuardDuty - EKS / Container Findings", acct, region, guardduty_query))
                   widgets.append(_log_widget(12, y, 12, 8, "Inspector - Critical/High Image Findings", acct, region, inspector_query))
@@ -363,12 +436,17 @@ Resources:
                   if request_type in ("Create", "Update"):
                       namespace = props.get("MetricNamespace", "EKS/Security")
                       collector_name = props.get("CollectorDashboardName", "eks-security-dashboard")
-                      account_ids = props["MemberAccountIds"]
+                      account_ids = props.get("MemberAccountIds", [])
                       if isinstance(account_ids, str):
                           account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      log_account_ids = props.get("LogAccountIds", [])
+                      if isinstance(log_account_ids, str):
+                          log_account_ids = [a.strip() for a in log_account_ids.split(",") if a.strip()]
+                      if not re.fullmatch(r"[A-Za-z0-9_./-]+", namespace):
+                          raise ValueError("MetricNamespace may only contain letters, numbers, underscores, dots, slashes, and hyphens")
                       region = props.get("Region") or context.invoked_function_arn.split(":")[3]
 
-                      body = build_dashboard_body(namespace, collector_name, account_ids, region)
+                      body = build_dashboard_body(namespace, collector_name, account_ids, region, log_account_ids)
                       cloudwatch.put_dashboard(DashboardName=dashboard_name, DashboardBody=json.dumps(body))
                       send_cfn_response(event, context, "SUCCESS", physical_resource_id=dashboard_name)
 
@@ -398,6 +476,7 @@ Resources:
       ServiceToken: !GetAtt DashboardGeneratorFunction.Arn
       DashboardName: !Ref DashboardName
       MemberAccountIds: !Join [",", !Ref MemberAccountIds]
+      LogAccountIds: !Join [",", !Ref LogAccountIds]
       MetricNamespace: !Ref MetricNamespace
       CollectorDashboardName: !Ref CollectorDashboardName
       Region: !Ref "AWS::Region"

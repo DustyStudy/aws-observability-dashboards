@@ -5,12 +5,13 @@ variable "dashboard_name" {
 }
 
 variable "member_account_ids" {
-  description = "Every member account ID whose Bedrock usage and cost-collector metrics should appear on this dashboard (the same accounts you deployed the collector module and an OAM Link to). Does not need to include the monitoring account itself unless it also runs its own collector."
+  description = "Leave empty (the default) to show every account linked to this monitoring account, using CloudWatch Metrics Insights queries that group by account. Or list specific 12-digit account IDs to show only those, one metric per account (limited to roughly 500/(series+1) accounts per widget)."
   type        = list(string)
+  default     = []
 
   validation {
-    condition     = length(var.member_account_ids) > 0
-    error_message = "member_account_ids must contain at least one account ID."
+    condition     = alltrue([for a in var.member_account_ids : can(regex("^[0-9]{12}$", a))])
+    error_message = "Every member_account_ids entry must be a 12-digit AWS account ID."
   }
 }
 
@@ -18,4 +19,9 @@ variable "metric_namespace" {
   description = "Must match the metric_namespace variable used when deploying the collector module in every member account."
   type        = string
   default     = "BedrockCostObservability"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_./-]+$", var.metric_namespace))
+    error_message = "metric_namespace may only contain letters, numbers, underscores, dots, slashes, and hyphens."
+  }
 }

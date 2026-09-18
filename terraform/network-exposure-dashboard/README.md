@@ -137,6 +137,25 @@ Organization, use the two halves this folder already splits out:
   every member account's local metrics and logs through CloudWatch
   cross-account observability (OAM). It contains no scanning logic.
 
+`org-dashboard/` has two modes, chosen by `member_account_ids`:
+
+- **All accounts (default, `member_account_ids = []`)**: the tiles and bar
+  charts are CloudWatch Metrics Insights queries over every account linked to
+  the monitoring account, for example
+  `SELECT SUM(PublicEc2Instances) FROM SCHEMA("NetworkExposure", Region)` for a
+  tile and the same query with `GROUP BY Region` for a bar chart. There is no
+  account list to maintain and no per-widget account ceiling.
+- **Explicit list (`member_account_ids = ["111111111111", ...]`)**: one
+  metric per account per series, limited to roughly 500/(series+1) accounts
+  per widget. This is the original behavior and is unchanged.
+
+The VPC Flow Log panels are the exception: a Logs Insights widget takes a
+single account, so they are **always per-account** and all-accounts mode cannot
+enumerate accounts for them. Use `log_account_ids` to name the accounts; if it
+is empty the panels use `member_account_ids`, and in all-accounts mode with no
+`log_account_ids` no log panels are shown (a short text widget says how to
+enable them).
+
 Steps (the one-time sink setup is described in
 [`org-observability/README.md`](../../org-observability/README.md)):
 
@@ -153,6 +172,20 @@ Steps (the one-time sink setup is described in
    collectors have run at least once (the default schedule is `rate(1 day)`):
 
    ```hcl
+   # All accounts linked to this monitoring account (no account list needed):
+   module "network_exposure_org_dashboard" {
+     source = "./terraform/network-exposure-dashboard/org-dashboard"
+
+     # Flow-log panels are per-account; name the accounts you want them for.
+     flow_logs_log_group_name = "/vpc/flow-logs" # leave "" to omit the flow-log panels
+     log_account_ids          = ["111111111111", "222222222222"]
+   }
+   ```
+
+   or restrict it to specific accounts (flow-log panels then default to the
+   same accounts):
+
+   ```hcl
    module "network_exposure_org_dashboard" {
      source = "./terraform/network-exposure-dashboard/org-dashboard"
 
@@ -165,6 +198,7 @@ Steps (the one-time sink setup is described in
 
    ```bash
    terraform init
+   terraform apply                                                   # all accounts
    terraform apply -var 'member_account_ids=["111111111111","222222222222"]'
    ```
 
@@ -173,37 +207,67 @@ Steps (the one-time sink setup is described in
 | Name | Default | Description |
 |---|---|---|
 | `dashboard_name` | `network-exposure-org-dashboard` | Name of the cross-account dashboard |
-| `member_account_ids` | *(required)* | Member account IDs (the accounts you deployed the collector and OAM Link to) |
-| `metric_namespace` | `NetworkExposure` | Must match the collector's `metric_namespace` |
-| `flow_logs_log_group_name` | *(blank)* | **Existing** VPC Flow Logs log group, queried by the same name in every member account. Blank omits the three flow-log panels |
+| `member_account_ids` | `[]` (all accounts) | 12-digit account IDs to show, one metric per account. Empty uses Metrics Insights over every linked account |
+| `log_account_ids` | `[]` | 12-digit account IDs to show the flow-log panels for. Empty falls back to `member_account_ids`; in all-accounts mode that means no log panels |
+| `metric_namespace` | `NetworkExposure` | Must match the collector's `metric_namespace` (letters, digits, `_ . / -`) |
+| `flow_logs_log_group_name` | *(blank)* | **Existing** VPC Flow Logs log group, queried by the same name in every account the log panels cover. Blank omits the three flow-log panels |
 
 Outputs: `dashboard_name`, `dashboard_url`.
 
 ### What the org dashboard shows
 
 - **24h tiles** (sensitive-port SG rules, public EC2, public RDS, internet-facing
-  load balancers): org-wide totals summed across all member accounts and regions.
-- **By Region bar charts** (the four above plus public S3 buckets): one series
-  per account per region, so you can see which account and region an exposure
-  sits in.
+  load balancers): org-wide totals summed across all accounts and regions.
+  In all-accounts mode each is `SELECT SUM(<metric>) FROM SCHEMA("<namespace>", Region)`.
+- **By Region bar charts** (the four above plus public S3 buckets): in explicit
+  mode, one series per account per region, so you can see which account and
+  region an exposure sits in. In all-accounts mode, one bar per region summed
+  across the organization (`... GROUP BY Region`); there is no per-account
+  breakdown, because that would be cut off at 500 series per query. Use the
+  explicit list if you need to see which account an exposure sits in.
 - **VPC Flow Log panels** (rejected-connection trend, top rejected source IPs,
   possible port scans): Logs Insights widgets cannot combine accounts, because
   a log widget takes a single `accountId`. The dashboard therefore repeats each
-  panel once per member account, with the account ID in the title, laid out
-  two per row. Each account must already deliver default-format flow logs to
-  the named log group; an account without it shows an empty widget.
+  panel once per log account (`log_account_ids`, else `member_account_ids`),
+  with the account ID in the title, laid out two per row. Each account must
+  already deliver default-format flow logs to the named log group; an account
+  without it shows an empty widget.
 
-### Limits: how many accounts one org-dashboard supports
+### All-accounts mode: caveats
+
+All-accounts mode is new and has **not been verified against a live AWS
+Organization**. Things to know before relying on it:
+
+- Metrics Insights returns at most 500 time series per query. The tiles and
+  the per-region bars are far below that (one series per region), but if the
+  collectors ever publish more than 500 matching series the results are
+  truncated.
+- Each `SUM` is taken over the period (86400 s). The collector publishes once
+  per schedule (`rate(1 day)` by default, `exposure_scan_schedule` in
+  `collector/`), so this is correct as long as the schedule is not shorter
+  than one day; a shorter schedule would count each account more than once per
+  period.
+- The queries also include any metrics the monitoring account itself publishes
+  in this namespace.
+- Use the explicit `member_account_ids` list to restrict the dashboard to
+  specific accounts.
+- Log panels are always per-account (see above).
+
+### Limits
 
 CloudWatch allows at most 500 metrics per widget and 500 widgets per
-dashboard. This pattern uses one metric per account per series (plus one
-`SUM()` for the tiles), so a widget with S series supports roughly
-500/(S+1) accounts. Every metric widget on this dashboard has a single
-series, which puts the hard ceiling at 499 accounts. Log panels are the
-tighter constraint: each of the three flow-log panels adds one widget per
-account (9 metric widgets + 3 x N log widgets), so with flow logs enabled
-the dashboard tops out at 163 accounts. Very large organizations should
-split their accounts across several org-dashboards: deploy the stack multiple
-times with different `dashboard_name` and `member_account_ids` subsets (and leave
-the flow-log group blank on all but the deployments that need those panels).
-A precondition on the dashboard resource fails the plan with a clear message if a single deployment would exceed either limit.
+dashboard. In all-accounts mode each metric widget carries a single query, so
+there is no account ceiling for the metric widgets. In explicit mode this
+pattern uses one metric per account per series (plus one `SUM()` for the
+tiles), so a widget with S series supports roughly 500/(S+1) accounts; every
+metric widget on this dashboard has a single series, which puts the ceiling at
+499 accounts. Log panels are the tighter constraint and are capped by the log
+account list in every mode: each of the three flow-log panels adds one widget
+per log account (9 metric widgets + 3 x N log widgets), so with flow logs
+enabled the dashboard tops out at 163 log accounts. Very large organizations
+should keep `log_account_ids` to the accounts that need flow-log panels, or
+split across several org-dashboards: apply the module multiple times with
+different `dashboard_name` and account subsets (and leave the flow-log group
+blank on all but the deployments that need those panels). Preconditions on the
+dashboard resource fail the plan with a clear message if a single deployment
+would exceed either limit.

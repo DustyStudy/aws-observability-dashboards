@@ -25,11 +25,13 @@ Parameters:
 
   MemberAccountIds:
     Type: CommaDelimitedList
+    Default: ""
     Description: >-
-      Every member account ID whose collector metrics should appear on this
-      dashboard (the same accounts you deployed collector.yaml and the OAM
-      Link to). Does not need to include the monitoring account itself
-      unless it also runs its own collectors.
+      Leave empty (the default) to show every account linked to this
+      monitoring account, using CloudWatch Metrics Insights queries that
+      group by account. Or list specific 12-digit account IDs to show only
+      those, one metric per account (limited to roughly 500/(series+1)
+      accounts per widget).
 
   MetricNamespace:
     Type: String
@@ -190,6 +192,7 @@ Resources:
       Code:
         ZipFile: |
           import json
+          import re
           import urllib.request
 
           import boto3
@@ -220,9 +223,23 @@ Resources:
           # Widget builders — same "hidden per-account entry + one visible
           # SUM() expression" recipe used by every org-dashboard in this
           # repo. See ../../org-observability/README.md for the general
-          # pattern this is built on.
+          # pattern this is built on. With no member account IDs they emit
+          # CloudWatch Metrics Insights queries instead (all-accounts mode).
           # ---------------------------------------------------------------
-          def _sum_across_accounts(namespace, metric_name, account_ids, label, stat="Maximum", period=86400, id_prefix="m"):
+          def _sum_across_accounts(namespace, metric_name, account_ids, label, stat="Maximum", period=86400, id_prefix="m", region_dim=False, insights_fn="SUM"):
+              if not account_ids:
+                  # All-accounts mode: one Metrics Insights query over every
+                  # account linked to this monitoring account. SCHEMA() must
+                  # list the metric's exact dimension set: none, except the
+                  # network-exposure metrics, which carry Region (summed
+                  # across regions, no GROUP BY).
+                  schema = f'"{namespace}", Region' if region_dim else f'"{namespace}"'
+                  return [[{
+                      "expression": f"SELECT {insights_fn}({metric_name}) FROM SCHEMA({schema})",
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": period,
+                  }]]
               entries = []
               ids = []
               for i, acct in enumerate(account_ids):
@@ -233,27 +250,27 @@ Resources:
                       "id": mid, "visible": False,
                   }])
               entries.append([{
-                  "expression": f"SUM([{','.join(ids)}])",
+                  "expression": f"{insights_fn}([{','.join(ids)}])",
                   "label": label,
                   "id": f"total_{id_prefix}",
               }])
               return entries
 
 
-          def _single_value_widget(x, y, w, h, title, namespace, metric_name, account_ids, region, stat="Maximum"):
+          def _single_value_widget(x, y, w, h, title, namespace, metric_name, account_ids, region, stat="Maximum", insights_fn="SUM"):
               return {
                   "type": "metric", "x": x, "y": y, "width": w, "height": h,
                   "properties": {
                       "title": title, "view": "singleValue", "region": region,
-                      "metrics": _sum_across_accounts(namespace, metric_name, account_ids, title, stat=stat),
+                      "metrics": _sum_across_accounts(namespace, metric_name, account_ids, title, stat=stat, insights_fn=insights_fn),
                   },
               }
 
 
-          def _trend_widget(x, y, w, h, title, namespace, series, account_ids, region):
+          def _trend_widget(x, y, w, h, title, namespace, series, account_ids, region, region_dim=False):
               metrics = []
               for i, (metric_name, label, stat) in enumerate(series):
-                  metrics.extend(_sum_across_accounts(namespace, metric_name, account_ids, label, stat=stat, id_prefix=f"s{i}_"))
+                  metrics.extend(_sum_across_accounts(namespace, metric_name, account_ids, label, stat=stat, id_prefix=f"s{i}_", region_dim=region_dim))
               return {
                   "type": "metric", "x": x, "y": y, "width": w, "height": h,
                   "properties": {"title": title, "view": "timeSeries", "region": region, "metrics": metrics},
@@ -262,6 +279,12 @@ Resources:
 
           def _region_breakdown_bar_widget(x, y, w, h, title, namespace, metric_name, account_ids, region):
               metrics = []
+              if not account_ids:
+                  metrics.append([{
+                      "expression": f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}", Region) GROUP BY AWS.AccountId, Region',
+                      "id": "osg_all",
+                      "period": 86400,
+                  }])
               for i, acct in enumerate(account_ids):
                   metrics.append([{
                       "expression": f"SEARCH('{{{namespace},Region}} MetricName=\"{metric_name}\"', 'Maximum', 86400)",
@@ -302,7 +325,7 @@ Resources:
                                 [("PublicEc2Instances", "Public EC2", "Maximum"),
                                  ("PubliclyAccessibleRdsInstances", "Public RDS", "Maximum"),
                                  ("InternetFacingLoadBalancers", "Internet-Facing LBs", "Maximum"),
-                                 ("PubliclyAccessibleS3Buckets", "Public S3 Buckets", "Maximum")], account_ids, region),
+                                 ("PubliclyAccessibleS3Buckets", "Public S3 Buckets", "Maximum")], account_ids, region, region_dim=True),
                   _region_breakdown_bar_widget(0, 16, 12, 6, "Open Security Group Rules by Account/Region (KSI-CNA-RNT)", net, "OpenSecurityGroupRules", account_ids, region),
                   _trend_widget(12, 16, 12, 6, "External-Trust IAM Roles, Org-Wide (KSI-IAM-JIT)", nhi,
                                 [("ExternalTrustRoles", "External-Trust Roles", "Maximum")], account_ids, region),
@@ -311,7 +334,7 @@ Resources:
                   _single_value_widget(8, 22, 4, 4, "Config Rules Without Auto-Remediation, Org-Wide (KSI-CNA-EIS)", ns, "ConfigRulesWithoutRemediation", account_ids, region, stat="Sum"),
                   _single_value_widget(12, 22, 4, 4, "VPCs Relying on Default NACL Only, Org-Wide (KSI-CNA-ULN)", ns, "VpcsWithoutCustomNacl", account_ids, region, stat="Sum"),
                   _single_value_widget(16, 22, 4, 4, "ACM Certificates Expiring Within 30 Days, Org-Wide (KSI-SVC-VCM)", ns, "AcmCertsExpiringSoon", account_ids, region, stat="Sum"),
-                  _single_value_widget(20, 22, 4, 4, "Security Hub Standards Score, Org-Wide Avg % Passed (KSI-SVC-EIS)", ns, "SecurityHubStandardsScorePercent", account_ids, region, stat="Average"),
+                  _single_value_widget(20, 22, 4, 4, "Security Hub Standards Score, Org-Wide Avg % Passed (KSI-SVC-EIS)", ns, "SecurityHubStandardsScorePercent", account_ids, region, stat="Average", insights_fn="AVG"),
                   _trend_widget(0, 26, 12, 6, "Config Auto-Remediation Coverage, Org-Wide (KSI-CNA-EIS)", ns,
                                 [("ConfigRulesWithRemediation", "Rules With Remediation", "Sum"),
                                  ("ConfigRulesWithoutRemediation", "Rules Without Remediation", "Sum")], account_ids, region),
@@ -349,9 +372,16 @@ Resources:
                           "network": props.get("NetworkExposureNamespace", "NetworkExposure"),
                           "security": props.get("SecurityObservabilityNamespace", "SecurityObservability"),
                       }
-                      account_ids = props["MemberAccountIds"]
+                      account_ids = props.get("MemberAccountIds", [])
                       if isinstance(account_ids, str):
                           account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      account_ids = [a for a in account_ids if a]
+                      for ns in namespaces.values():
+                          if not re.fullmatch(r"[A-Za-z0-9_./-]+", ns):
+                              raise ValueError("Metric namespaces may only contain letters, numbers, underscores, dots, slashes, and hyphens")
+                      for a in account_ids:
+                          if not re.fullmatch(r"[0-9]{12}", a):
+                              raise ValueError(f"Invalid account ID: {a!r}")
                       region = props.get("Region") or context.invoked_function_arn.split(":")[3]
 
                       body = build_dashboard_body(namespaces, account_ids, region)

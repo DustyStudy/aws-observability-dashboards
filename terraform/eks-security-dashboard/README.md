@@ -155,48 +155,83 @@ shared one-time setup (StackSets trusted access, the OAM sink).
    `EKS/Security` (it is a constant in the Lambda), and the Lambda runs daily,
    so give it a day before expecting data.
 3. **Apply the org dashboard once**, in the monitoring account and the same
-   region as the OAM sink and the collectors:
+   region as the OAM sink and the collectors. With no `member_account_ids`
+   the metric tiles cover every linked account:
    ```hcl
    module "eks_security_org_dashboard" {
      source = "./terraform/eks-security-dashboard/org-dashboard"
 
-     member_account_ids = ["111111111111", "222222222222", "333333333333"]
+     # Optional: GuardDuty and Inspector log panels for these accounts only
+     log_account_ids = ["111111111111", "222222222222"]
    }
    ```
-   or directly:
+   or restrict it to an explicit list of accounts:
    ```bash
    cd terraform/eks-security-dashboard/org-dashboard
    terraform init
    terraform apply -var 'member_account_ids=["111111111111","222222222222"]'
    ```
 
-Every widget from the single-account dashboard is carried over: each count
-is summed across all member accounts (one hidden per-account metric plus one
-visible `SUM()`), and the GuardDuty and Inspector Logs Insights panels are
-repeated once per member account (a log widget takes a single `accountId`
-and cannot combine accounts), each titled with its account ID.
+Every widget from the single-account dashboard is carried over. `org-dashboard/`
+has two modes for the six metric tiles, chosen by `member_account_ids`:
+
+- **All accounts (default, `member_account_ids = []`)**: each tile is a
+  CloudWatch Metrics Insights query over every account linked to the
+  monitoring account, for example
+  `SELECT SUM(ClusterVersionDriftCount) FROM SCHEMA("EKS/Security")`. The
+  collector publishes these counts without dimensions, so `SCHEMA` lists none.
+  There is no account list to maintain and no account ceiling.
+- **Explicit list (`member_account_ids = ["111111111111", ...]`)**: one hidden
+  metric per account plus one visible `SUM()` per tile, limited to 499
+  accounts per widget (500 metrics including the `SUM()`).
+
+The GuardDuty and Inspector Logs Insights panels take a single `accountId`, so
+they can never cover "all accounts": they are repeated once per account
+(each titled with its account ID), for the accounts in `log_account_ids` if
+set, otherwise for `member_account_ids`. In all-accounts mode without
+`log_account_ids` no log panels are drawn, and the note above the log section
+says how to enable them.
+
+All-accounts mode is new and has **not been verified against a live AWS
+Organization**. Things to know before relying on it:
+
+- Metrics Insights returns at most 500 time series per query. Each tile here
+  is one summed series, so the tiles are unaffected.
+- Each `SUM` is taken over the period (86400 s), so it is only correct if the
+  collector publishes at most once per period. The collector publishes once
+  on every run of its EventBridge schedule (`patch_check_schedule`, default
+  `rate(1 day)`); with a shorter schedule an account would be counted more
+  than once per day, so keep the default or use a schedule of one day or more.
+- The queries also include any metrics the monitoring account itself
+  publishes in this namespace.
+- Use the explicit list (`member_account_ids`) to restrict the dashboard to
+  specific accounts.
+- Log panels are always per account (see above).
 
 ### Org dashboard inputs
 
 | Name | Default | Description |
 |---|---|---|
 | `dashboard_name` | `eks-security-org-dashboard` | Name of the org dashboard. Keep it different from the collector's `dashboard_name` |
-| `member_account_ids` | (required) | List of 12-digit member account IDs to include |
-| `metric_namespace` | `EKS/Security` | Namespace the collector publishes to; only change if you forked the collector |
+| `member_account_ids` | `[]` | Empty = all-accounts mode (Metrics Insights queries over every linked account). Otherwise a list of 12-digit account IDs to show, one metric per account (max 499) |
+| `log_account_ids` | `[]` | 12-digit IDs of the accounts that get GuardDuty and Inspector log panels (max 246). If empty, log panels are created for `member_account_ids`; in all-accounts mode none are created |
+| `metric_namespace` | `EKS/Security` | Namespace the collector publishes to; only change if you forked the collector. Letters, digits, `_`, `.`, `/` and `-` only |
 | `collector_dashboard_name` | `eks-security-dashboard` | The `dashboard_name` the collectors were deployed with (used to build the log group names) |
 
 The only output is `dashboard_url`.
 
 ### Org-wide limitations
 
-CloudWatch allows at most 500 metrics per widget, and this pattern uses one
-metric per account per series (plus one combining expression), so a widget
-with S series supports roughly 500/(S+1) accounts. The metric widgets here
-each have a single series, so they are not the limiting factor. The log
-panels are: they add one widget per account per panel (two per account), and
-a dashboard is capped at 500 widgets. With 8 fixed widgets that is at most
-246 accounts per dashboard; a validation on `member_account_ids` rejects a
-larger list. Very large organizations should split their accounts across
-several org-dashboards, applying this configuration multiple times with a
-different `dashboard_name` and a different subset of `member_account_ids`
-each time.
+In all-accounts mode the metric tiles have no account limit. In explicit
+mode CloudWatch allows at most 500 metrics per widget and this pattern uses
+one metric per account per series (plus one combining expression), so the
+single-series tiles here fit at most 499 accounts. The log panels are the
+tighter limit: they add one widget per account per panel (two per account),
+and a dashboard is capped at 500 widgets. With 8 fixed widgets that is at
+most 246 log accounts per dashboard; validation on `log_account_ids` rejects
+a longer list, and a precondition rejects a `member_account_ids` list longer
+than 246 when `log_account_ids` is empty (set `log_account_ids` to a subset,
+or split the accounts). Very large organizations that need log panels for
+more accounts should apply this configuration multiple times with a
+different `dashboard_name` and a different subset of `log_account_ids` each
+time.

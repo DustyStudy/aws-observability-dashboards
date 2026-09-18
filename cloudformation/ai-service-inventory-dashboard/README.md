@@ -134,7 +134,16 @@ for the one-time setup and the full architecture.
    sink once in the monitoring account and the link via its own StackSet, as
    described in `org-observability/README.md`.
 3. **Deploy `org-dashboard.yaml` once**, in the monitoring account, after the
-   collectors have run at least once (the default schedule is `rate(1 day)`):
+   collectors have run at least once (the default schedule is `rate(1 day)`).
+   To show every linked account, leave `MemberAccountIds` empty:
+   ```bash
+   aws cloudformation deploy \
+     --template-file org-dashboard.yaml \
+     --stack-name ai-service-inventory-org-dashboard \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --region us-east-1
+   ```
+   To restrict it to specific accounts, list them:
    ```bash
    aws cloudformation deploy \
      --template-file org-dashboard.yaml \
@@ -146,29 +155,69 @@ for the one-time setup and the full architecture.
    CloudFormation cannot loop-generate a `DashboardBody`, so the template
    uses a Lambda-backed custom resource that renders the dashboard from
    `MemberAccountIds` (KMS-encrypted log group and DLQ, X-Ray tracing, a role
-   that can only manage this one dashboard).
+   that can only manage this one dashboard). The Lambda rejects account IDs
+   that are not 12 digits and metric namespaces containing characters other
+   than letters, numbers, `_`, `.`, `/` and `-`, failing the stack cleanly.
 
 | Parameter | Default | Description |
 |---|---|---|
 | `DashboardName` | `ai-service-inventory-org-dashboard` | Name of the cross-account dashboard |
-| `MemberAccountIds` | (required) | Comma-separated member account IDs to include (the accounts running the collector and linked via OAM) |
+| `MemberAccountIds` | (empty = all linked accounts) | Optional comma-separated 12-digit member account IDs to include (the accounts running the collector and linked via OAM) |
 | `MetricNamespace` | `AIServiceInventory` | Must match `MetricNamespace` used for `collector.yaml` in every member account |
 | `LogRetentionDays` | `365` | Retention for the dashboard-generator Lambda's log group |
 
 Output: `DashboardUrl`.
 
-The org dashboard shows: the org-wide count of active service/region pairs,
-the number of active account/region pairs per service, active pairs per
-account, and one panel per service with one series per account **and**
-region (labelled `<account> - <region>`), so a service quietly in use in an
-unapproved region of a specific account stands out.
+`org-dashboard.yaml` has two modes, chosen by the `MemberAccountIds` parameter:
 
-**Scale limitation.** CloudWatch allows at most 500 metrics per dashboard
-widget, and this pattern uses one metric per account per series, so a widget
-with S series supports roughly 500/(S+1) accounts. The by-service summary
-widget here has 6 series (roughly 70 accounts). Also note that each
-per-service `SEARCH` returns one series per enabled region per account (the
-collector publishes a `0` for inactive regions too), so those panels reach
-the widget cap sooner; very large organizations should split accounts across
-several org-dashboards by deploying this stack multiple times with different
+- **All accounts (default, `MemberAccountIds` left empty)**: each widget is a
+  CloudWatch Metrics Insights query over every account linked to the
+  monitoring account, for example
+  `SELECT SUM(ServiceActive) FROM SCHEMA("AIServiceInventory", Service, Region) GROUP BY Service`.
+  There is no account list to maintain and no per-widget account ceiling.
+- **Explicit list (`MemberAccountIds=111111111111,222222222222`)**: one
+  metric per account per series, limited to roughly 500/(series+1) accounts
+  per widget. The dashboard is exactly what it was before all-accounts mode
+  existed.
+
+All-accounts mode is new and has **not been verified against a live AWS
+Organization**. Things to know before relying on it:
+
+- Metrics Insights returns at most 500 time series per query, so the
+  per-account breakdown is truncated beyond that. To keep the chart
+  readable the "by Account" widget asks for the 100 accounts with the most
+  active service/region pairs (`ORDER BY SUM() DESC LIMIT 100`); the
+  org-wide totals and the per-service widgets are unaffected.
+- Each `SUM` is over the period (86400 s). The collector publishes
+  `ServiceActive` once per schedule (`rate(1 day)` by default), so this is
+  correct as long as the schedule is not shorter than one day; a shorter
+  schedule would count an account more than once per period.
+- The queries also include any `ServiceActive` metrics the monitoring
+  account itself publishes in this namespace.
+- Use the explicit list to restrict the dashboard to specific accounts.
+
+What the widgets show in each mode:
+
+| Widget | All-accounts mode (Metrics Insights) | Explicit list |
+|---|---|---|
+| Active AI Service/Region Pairs (org-wide) | `SELECT SUM(ServiceActive) FROM SCHEMA("<ns>", Service, Region)` | hidden per-account counts plus one `SUM()` |
+| Active Regions per AI Service | `... GROUP BY Service` (one series per service) | per-account counts summed per service |
+| Active AI Services by Account | `... GROUP BY AWS.AccountId ORDER BY SUM() DESC LIMIT 100` (top 100 accounts) | one series per account |
+| One panel per service | `... WHERE Service = '<service>' GROUP BY Region`: the **number of accounts** using the service in each region, titled "<service> — Accounts Using It, by Region" | one series per account **and** region (labelled `<account> - <region>`), titled "<service> — Active by Account/Region" |
+
+The per-service panels change meaning in all-accounts mode on purpose:
+grouping by account and region would need accounts x regions series and
+truncate at 500, so they group by region only and show how many accounts use
+each service there (the org-wide shadow-AI adoption view). For per-account,
+per-region detail, use the explicit list.
+
+**Scale limitation (explicit list only).** CloudWatch allows at most 500
+metrics per dashboard widget, and the explicit pattern uses one metric per
+account per series, so a widget with S series supports roughly 500/(S+1)
+accounts. The by-service summary widget here has 6 series (roughly 70
+accounts). Also note that each per-service `SEARCH` returns one series per
+enabled region per account (the collector publishes a `0` for inactive
+regions too), so those panels reach the widget cap sooner; very large
+organizations should use all-accounts mode, or split accounts across several
+org-dashboards by deploying this stack multiple times with different
 `DashboardName` and `MemberAccountIds` subsets.

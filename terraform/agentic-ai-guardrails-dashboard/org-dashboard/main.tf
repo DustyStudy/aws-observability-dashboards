@@ -12,6 +12,13 @@ terraform {
 data "aws_region" "current" {}
 
 locals {
+  # With no member_account_ids the dashboard queries every account linked to
+  # this monitoring account through CloudWatch Metrics Insights
+  # (SELECT ... GROUP BY AWS.AccountId) instead of listing accounts one by
+  # one, so it is not bound by the per-widget metric limit. With a list, it
+  # keeps the explicit per-account SEARCH approach below.
+  all_accounts = length(var.member_account_ids) == 0
+
   agents     = "AWS/Bedrock/Agents"
   guardrails = "AWS/Bedrock/Guardrails"
 
@@ -67,15 +74,36 @@ locals {
   }
 
   search_group_totals = {
-    for key, spec in local.search_specs : key => [[{
-      expression = "${spec.combine}([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
-      label      = spec.label
-      id         = "total_${spec.id_prefix}"
-    }]]
+    for key, spec in local.search_specs : key => [
+      for _ in [1] : [{
+        expression = "${spec.combine}([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+      }] if !local.all_accounts
+    ]
+  }
+
+  # All-accounts mode: one Metrics Insights query per spec, spanning every
+  # linked account. SCHEMA lists the exact dimension set the metric is
+  # published with (Operation), mirroring the SEARCH expressions above.
+  # combine (SUM / AVG) is used directly as the Insights aggregate function.
+  search_group_insights = {
+    for key, spec in local.search_specs : key => [
+      for _ in [1] : [{
+        expression = "SELECT ${spec.combine}(${spec.metric_name}) FROM SCHEMA(\"${spec.namespace}\", ${spec.dimension})"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+        period     = spec.period
+      }] if local.all_accounts
+    ]
   }
 
   search_groups = {
-    for key, spec in local.search_specs : key => concat(local.search_group_accounts[key], local.search_group_totals[key])
+    for key, spec in local.search_specs : key => concat(
+      local.search_group_accounts[key],
+      local.search_group_totals[key],
+      local.search_group_insights[key],
+    )
   }
 
   # Intervention rate: two dedicated hidden per-account SEARCH groups
@@ -91,7 +119,8 @@ locals {
         visible    = false
       }]
     ],
-    [[{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "ri${i}"])}])", id = "rate_invocations", visible = false }]]
+    [for _ in [1] : [{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "ri${i}"])}])", id = "rate_invocations", visible = false }] if !local.all_accounts],
+    [for _ in [1] : [{ expression = "SELECT SUM(Invocations) FROM SCHEMA(\"${local.guardrails}\", Operation)", id = "rate_invocations", visible = false, period = 86400 }] if local.all_accounts]
   )
   rate_intervened_hidden = concat(
     [
@@ -102,7 +131,8 @@ locals {
         visible    = false
       }]
     ],
-    [[{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "rv${i}"])}])", id = "rate_intervened", visible = false }]]
+    [for _ in [1] : [{ expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "rv${i}"])}])", id = "rate_intervened", visible = false }] if !local.all_accounts],
+    [for _ in [1] : [{ expression = "SELECT SUM(InvocationsIntervened) FROM SCHEMA(\"${local.guardrails}\", Operation)", id = "rate_intervened", visible = false, period = 86400 }] if local.all_accounts]
   )
   intervention_rate_metrics = concat(
     local.rate_invocations_hidden,
@@ -112,14 +142,25 @@ locals {
 
   # Interventions by policy category: variable series per account, so
   # this stays as one visible SEARCH per account rather than a sum.
-  policy_category_metrics = [
-    for i, acct in var.member_account_ids : [{
-      expression = "SEARCH('{${local.guardrails},GuardrailPolicyType} MetricName=\"InvocationsIntervened\"', 'Sum', 300)"
-      id         = "pc${i}"
-      accountId  = acct
-      label      = acct
-    }]
-  ]
+  # In all-accounts mode one Metrics Insights query groups by account and
+  # policy type instead.
+  policy_category_metrics = concat(
+    [
+      for i, acct in var.member_account_ids : [{
+        expression = "SEARCH('{${local.guardrails},GuardrailPolicyType} MetricName=\"InvocationsIntervened\"', 'Sum', 300)"
+        id         = "pc${i}"
+        accountId  = acct
+        label      = acct
+      }]
+    ],
+    [
+      for _ in [1] : [{
+        expression = "SELECT SUM(InvocationsIntervened) FROM SCHEMA(\"${local.guardrails}\", GuardrailPolicyType) GROUP BY AWS.AccountId, GuardrailPolicyType"
+        id         = "pc_all"
+        period     = 300
+      }] if local.all_accounts
+    ],
+  )
 }
 
 resource "aws_cloudwatch_dashboard" "agentic_ai_guardrails_org" {
