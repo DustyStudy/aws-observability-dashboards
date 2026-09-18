@@ -9,6 +9,10 @@ the images running on them: control-plane/nodegroup version drift, node AMI
 patch staleness, GuardDuty EKS Protection findings, and Inspector container
 image vulnerability findings.
 
+This README covers the single-account deployment (the module in this
+folder). To roll the same dashboard out across an AWS Organization, see
+[Org-wide deployment](#org-wide-deployment) below.
+
 ## What it monitors
 
 | Signal | Source | How it gets to the dashboard |
@@ -23,7 +27,8 @@ image vulnerability findings.
 
 The Lambda (`lambda/eks_patch_drift_checker.py`) runs on a schedule
 (`rate(1 day)` by default) and walks every EKS cluster and nodegroup in the
-account/region it's deployed to. Update `latest_eks_version` as you roll
+account/region it's deployed to (in an org-wide rollout, each member
+account runs its own copy). Update `latest_eks_version` as you roll
 clusters onto new Kubernetes versions.
 
 ## Prerequisites
@@ -112,3 +117,86 @@ violations or a specific admission-controller policy — add a new EventBridge
 rule + Logs group pair for event-driven signals (matching the GuardDuty/
 Inspector pattern), or a new metric in the patch-check Lambda for anything
 you can pull from the EKS/EC2 APIs directly.
+
+## Org-wide deployment
+
+The module above is the **single-account** deployment: one apply that scans
+one account/region and draws its own dashboard. To monitor every account in
+an AWS Organization from one place, split it into per-account collectors plus
+one central dashboard, using CloudWatch cross-account observability (OAM).
+See [`org-observability/README.md`](../../org-observability/README.md) for the
+shared one-time setup (StackSets trusted access, the OAM sink).
+
+| Piece | Source | Where it runs |
+|---|---|---|
+| OAM Link | `org-observability/oam-link` | Every member account |
+| Collector | `collector/` (this folder) | Every member account - same resources as this module minus the dashboard |
+| Org dashboard | `org-dashboard/` (this folder) | Central monitoring account, applied **once** |
+
+1. **Deploy the OAM sink** in the monitoring account (once) and roll the OAM
+   Link out to every member account, as described in the org-observability
+   README.
+2. **Deploy the collector to every member account.** The CloudFormation
+   `collector.yaml` via StackSets is the usual route (see
+   `cloudformation/eks-security-dashboard/README.md`); the `collector/`
+   Terraform module is the equivalent if you drive member accounts with
+   Terraform (for example one provider alias per account):
+   ```hcl
+   module "eks_security_collector" {
+     source = "./terraform/eks-security-dashboard/collector"
+
+     dashboard_name     = "eks-security-dashboard"
+     latest_eks_version = "1.31"
+   }
+   ```
+   Use the same `dashboard_name` in every account (default
+   `eks-security-dashboard`): it names the GuardDuty and Inspector log groups
+   the org dashboard queries. The collector's metric namespace is fixed at
+   `EKS/Security` (it is a constant in the Lambda), and the Lambda runs daily,
+   so give it a day before expecting data.
+3. **Apply the org dashboard once**, in the monitoring account and the same
+   region as the OAM sink and the collectors:
+   ```hcl
+   module "eks_security_org_dashboard" {
+     source = "./terraform/eks-security-dashboard/org-dashboard"
+
+     member_account_ids = ["111111111111", "222222222222", "333333333333"]
+   }
+   ```
+   or directly:
+   ```bash
+   cd terraform/eks-security-dashboard/org-dashboard
+   terraform init
+   terraform apply -var 'member_account_ids=["111111111111","222222222222"]'
+   ```
+
+Every widget from the single-account dashboard is carried over: each count
+is summed across all member accounts (one hidden per-account metric plus one
+visible `SUM()`), and the GuardDuty and Inspector Logs Insights panels are
+repeated once per member account (a log widget takes a single `accountId`
+and cannot combine accounts), each titled with its account ID.
+
+### Org dashboard inputs
+
+| Name | Default | Description |
+|---|---|---|
+| `dashboard_name` | `eks-security-org-dashboard` | Name of the org dashboard. Keep it different from the collector's `dashboard_name` |
+| `member_account_ids` | (required) | List of 12-digit member account IDs to include |
+| `metric_namespace` | `EKS/Security` | Namespace the collector publishes to; only change if you forked the collector |
+| `collector_dashboard_name` | `eks-security-dashboard` | The `dashboard_name` the collectors were deployed with (used to build the log group names) |
+
+The only output is `dashboard_url`.
+
+### Org-wide limitations
+
+CloudWatch allows at most 500 metrics per widget, and this pattern uses one
+metric per account per series (plus one combining expression), so a widget
+with S series supports roughly 500/(S+1) accounts. The metric widgets here
+each have a single series, so they are not the limiting factor. The log
+panels are: they add one widget per account per panel (two per account), and
+a dashboard is capped at 500 widgets. With 8 fixed widgets that is at most
+246 accounts per dashboard; a validation on `member_account_ids` rejects a
+larger list. Very large organizations should split their accounts across
+several org-dashboards, applying this configuration multiple times with a
+different `dashboard_name` and a different subset of `member_account_ids`
+each time.

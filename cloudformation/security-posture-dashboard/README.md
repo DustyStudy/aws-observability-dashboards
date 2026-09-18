@@ -63,3 +63,85 @@ EventBridge rule → CloudWatch Logs group → Logs Insights-powered dashboard
 widgets. To add a new source (Config, Access Analyzer, Inspector, etc.), copy
 the log group + EventBridge rule pair, point a new EventBridge rule at that
 service's event pattern, and add widgets querying the new log group.
+
+## Org-wide deployment
+
+To see Security Hub and GuardDuty findings for every account in an AWS
+Organization on one dashboard, split this stack into a per-account collector
+plus a single central dashboard. This builds on CloudWatch cross-account
+observability (Observability Access Manager, OAM); see
+[`org-observability/README.md`](../../org-observability/README.md) for the
+one-time sink setup.
+
+1. **Deploy the collector to every member account via StackSets.**
+   `collector.yaml` is this template minus the dashboard: the KMS key, the two
+   log groups, the EventBridge rules, and the metric filters. Deploy it as a
+   `SERVICE_MANAGED` StackSet targeting your OUs (Security Hub and/or
+   GuardDuty must be enabled in each account/region):
+   ```bash
+   aws cloudformation create-stack-set \
+     --stack-set-name security-posture-collector \
+     --template-body file://collector.yaml \
+     --permission-model SERVICE_MANAGED \
+     --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --region us-east-1
+
+   aws cloudformation create-stack-instances \
+     --stack-set-name security-posture-collector \
+     --deployment-targets OrganizationalUnitIds=<your-root-or-OU-id> \
+     --regions us-east-1 \
+     --region us-east-1
+   ```
+2. **Create the OAM link in every member account** (StackSet from
+   `org-observability/oam-link/`), sharing Metrics and Logs with the
+   monitoring account's OAM sink. Without the link, the central dashboard
+   cannot read the members' metrics or log groups.
+3. **Deploy `org-dashboard.yaml` once, in the monitoring account**, after the
+   collectors have received some findings:
+   ```bash
+   aws cloudformation deploy \
+     --template-file org-dashboard.yaml \
+     --stack-name security-posture-org-dashboard \
+     --parameter-overrides MemberAccountIds=111111111111,222222222222,333333333333 \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --region us-east-1
+   ```
+
+`org-dashboard.yaml` uses a small Lambda-backed custom resource to generate the
+`DashboardBody`, because CloudFormation cannot loop over account IDs inside a
+JSON string. The Lambda has permissions only for this one dashboard.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `DashboardName` | `security-posture-org-dashboard` | Name of the central dashboard |
+| `MemberAccountIds` | (required) | Comma-delimited member account IDs to include |
+| `MetricNamespace` | `SecurityObservability` | Must match the collector's `MetricNamespace` |
+| `NamePrefix` | `security-posture` | Must match the collector's `NamePrefix`; forms the log group names `/observability/<NamePrefix>/security-hub-findings` and `/observability/<NamePrefix>/guardduty-findings` |
+| `LogRetentionDays` | `365` | Retention for the generator Lambda's own log group |
+
+How the widgets are converted:
+
+- The three single-value metrics (Security Hub Critical, Security Hub High,
+  GuardDuty High Severity, 24h) become one hidden per-account metric entry each
+  plus one visible `SUM()` across accounts.
+- Logs Insights widgets cannot be collapsed across accounts: a CloudWatch log
+  widget takes a single `accountId`. Each of the five log panels (Security Hub
+  volume, by severity, top failing controls; GuardDuty by type, hourly trend)
+  is therefore rendered once per member account, with the account ID in the
+  widget title, in a non-overlapping grid.
+
+### Limitations
+
+- CloudWatch allows at most 500 metrics per widget. This pattern uses one
+  metric per account per series, plus one expression, so a widget with S
+  series supports roughly 500/(S+1) accounts. The metric tiles here have one
+  series each, which is about 250 accounts.
+- Log panels add one widget per account per panel (5 per account, plus 3
+  metric widgets), and a dashboard is capped at 500 widgets. This template
+  therefore supports at most 99 accounts and fails the deployment beyond that.
+  Very large organizations should split accounts across several
+  org-dashboards: deploy this stack multiple times with a different
+  `DashboardName` and a different subset of `MemberAccountIds` each time.
+- As with the single-account dashboard, the metrics and the severity/control
+  panels assume one finding per event (`detail.findings[0]`).

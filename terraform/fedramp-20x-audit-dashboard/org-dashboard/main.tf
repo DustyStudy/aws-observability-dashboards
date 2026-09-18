@@ -90,7 +90,7 @@ locals {
   # nhi-governance-dashboard's org-dashboard uses for SecretsWithoutRotation.
   open_sg_by_account_region_metrics = [
     for i, acct in var.member_account_ids : [{
-      expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\\\"OpenSecurityGroupRules\\\"', 'Maximum', 86400)"
+      expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)"
       id         = "osg${i}"
       accountId  = acct
       label      = "${acct} - $${PROP('Dim.Region')}"

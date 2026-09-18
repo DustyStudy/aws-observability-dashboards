@@ -79,3 +79,72 @@ does — check the service's CloudWatch metrics reference and add a widget with
 a `SEARCH()` expression scoped to that namespace, no new pipeline required. If
 a service's cost needs its own breakdown, copy the cost-collector Lambda
 pattern and change the Cost Explorer service filter.
+
+## Org-wide deployment
+
+To see Bedrock usage and cost across every account in an AWS Organization on
+one dashboard, deploy the per-account collector everywhere and a single
+org-dashboard in a central monitoring account. See
+[`../../org-observability/README.md`](../../org-observability/README.md) for
+the full background (OAM Sink/Link setup, StackSets prerequisites).
+
+1. **Collector via StackSets.** Deploy `collector.yaml` (this folder) to every
+   member account. It is the single-account stack minus the dashboard, so each
+   account publishes its own `EstimatedDailyCostUSD` metric locally:
+   ```bash
+   aws cloudformation create-stack-set      --stack-set-name bedrock-usage-cost-collector      --template-body file://collector.yaml      --permission-model SERVICE_MANAGED      --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false      --capabilities CAPABILITY_NAMED_IAM      --region us-east-1
+
+   aws cloudformation create-stack-instances      --stack-set-name bedrock-usage-cost-collector      --deployment-targets OrganizationalUnitIds=<your-root-or-OU-id>      --regions us-east-1      --region us-east-1
+   ```
+2. **OAM Link.** Every member account also needs the OAM Link StackSet
+   (`../../org-observability/oam-link`) sharing `AWS::CloudWatch::Metric` with
+   the monitoring account's OAM Sink. This is what lets the central dashboard
+   read each account's local metrics, including the native `AWS/Bedrock`
+   ones, which need no collector at all.
+3. **Deploy the org-dashboard once**, in the monitoring account, after the
+   collectors have run at least once:
+   ```bash
+   aws cloudformation deploy      --template-file org-dashboard.yaml      --stack-name bedrock-usage-cost-org-dashboard      --parameter-overrides MemberAccountIds=111111111111,222222222222,333333333333      --capabilities CAPABILITY_NAMED_IAM      --region us-east-1
+   ```
+
+### Org-dashboard parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `DashboardName` | `bedrock-usage-cost-org-dashboard` | Name of the cross-account CloudWatch dashboard |
+| `MemberAccountIds` | (required) | Comma-delimited member account IDs to include (the accounts you deployed the collector and OAM Link to) |
+| `MetricNamespace` | `BedrockCostObservability` | Must match the `MetricNamespace` used for `collector.yaml` in every member account |
+| `LogRetentionDays` | `365` | Retention for the dashboard-generator Lambda's own log group |
+
+The stack uses a Lambda-backed custom resource to render the `DashboardBody`
+(CloudFormation cannot loop-generate JSON), with the same hardening as the
+other org-dashboards: KMS-encrypted log group, DLQ, a role scoped to this one
+dashboard, reserved concurrency of 1 and X-Ray tracing.
+
+### Widgets
+
+| Widget | Combine across accounts |
+|---|---|
+| Bedrock Invocations (org-wide) | `SUM` |
+| Bedrock Invocations by Model and Account | one `SEARCH` per account, stacked, labelled `<account> - <model>` |
+| Bedrock Token Volume (Input vs Output, org-wide) | `SUM` |
+| Bedrock Invocation Latency (org-wide, avg ms) | `AVG` (never `SUM`) |
+| Bedrock Errors & Throttles (org-wide) | `SUM` |
+| Estimated Total Daily Cost (org-wide, USD) | `SUM` of every account's `TOTAL` series |
+| Estimated Daily Cost by Usage Type and Account | one `SEARCH` per account, labelled `<account> - <usage type>` |
+| Estimated Daily Cost per Account (USD) | each account's own `TOTAL` series side by side (cost attribution) |
+
+Native `AWS/Bedrock` metrics (invocations, tokens, latency, errors,
+throttles) need **no collector** in the member accounts, only the OAM Link.
+Only the three cost widgets depend on the collector.
+
+### Limitation: metrics per widget
+
+CloudWatch allows at most 500 metrics per widget, and this pattern uses one
+metric per account per series (plus one combining expression per series). A
+widget with `S` series therefore needs `S x (accounts + 1)` metrics, so it
+supports roughly `500 / (S + 1)` accounts as a safe rule of thumb. The widest
+widget here (Errors & Throttles, `S = 3`) tops out around 125-165 accounts.
+Very large organizations should split their accounts across several
+org-dashboards: deploy the org-dashboard multiple times, each with a different
+`DashboardName` and a different subset of `MemberAccountIds`.

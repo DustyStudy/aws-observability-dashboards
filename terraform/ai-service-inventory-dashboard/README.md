@@ -73,9 +73,11 @@ terraform apply
   `AWS/Rekognition`, `AWS/Comprehend`, `AWS/Textract`). To track another AI
   service, add a `label: namespace` entry to the `SERVICES` dict in
   `lambda/ai_service_inventory_collector.py` and re-apply.
-- **A single-account scan.** For an AWS Organization, deploy this module in
-  every member account, or extend the Lambda to assume a role into each
-  account before scanning (same pattern, more IAM plumbing).
+- **The root module is a single-account scan.** Each collector Lambda only
+  ever sees its own account. For an AWS Organization, use the org-wide
+  deployment below (the `collector/` module in every member account plus one
+  `org-dashboard/` in a central monitoring account) rather than adding
+  cross-account `sts:AssumeRole` logic to the Lambda.
 - **`list_metrics` only sees metrics published within roughly the last 14
   days to 2 weeks** by default, and a region with zero recent activity will
   correctly show `0` even if the service was used further in the past — this
@@ -99,7 +101,78 @@ not just a CloudWatch Logs line.
 
 ## Extending
 
-To scan additional AWS accounts, add cross-account `sts:AssumeRole` logic to
-the Lambda and loop over a list of account/role-ARN pairs the same way it
-currently loops over regions. To watch a different service, just add its
-CloudWatch namespace to the `SERVICES` dict — no other code changes needed.
+To cover additional AWS accounts, use the org-wide deployment below. To watch
+a different service, just add its CloudWatch namespace to the `SERVICES` dict
+— the collector needs no other code changes (for org-wide use, also add the
+service to the `services` list in `org-dashboard/main.tf` so it gets its own
+widget).
+
+## Org-wide deployment
+
+Answer "which regions in **which accounts** use which AI services?" across an
+entire AWS Organization. Nothing about the collector changes — each account
+still scans only itself and publishes `ServiceActive` locally. A central
+monitoring account then reads all of them through CloudWatch cross-account
+observability (OAM). See [`org-observability/README.md`](../../org-observability/README.md)
+for the one-time setup and the full architecture.
+
+1. **Collector in every member account.** Deploy the `collector/` module
+   (the collector without the dashboard) to each member account, or roll
+   out the equivalent CloudFormation `collector.yaml` from
+   `cloudformation/ai-service-inventory-dashboard` with a `SERVICE_MANAGED`
+   StackSet:
+   ```bash
+   aws cloudformation create-stack-set \
+     --stack-set-name ai-service-inventory-collector \
+     --template-body file://../../cloudformation/ai-service-inventory-dashboard/collector.yaml \
+     --permission-model SERVICE_MANAGED \
+     --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --region us-east-1
+
+   aws cloudformation create-stack-instances \
+     --stack-set-name ai-service-inventory-collector \
+     --deployment-targets OrganizationalUnitIds=<your-root-or-OU-id> \
+     --regions us-east-1 \
+     --region us-east-1
+   ```
+2. **OAM Link.** Every member account also needs the OAM Link
+   (`org-observability/oam-link`, sharing CloudWatch metrics) pointing at the
+   monitoring account's OAM Sink (`org-observability/oam-sink`). Deploy the
+   sink once in the monitoring account and the link via a StackSet (or the
+   Terraform equivalent), as described in `org-observability/README.md`.
+3. **Apply `org-dashboard/` once**, in the monitoring account, after the
+   collectors have run at least once (the default schedule is `rate(1 day)`):
+   ```hcl
+   module "ai_service_inventory_org_dashboard" {
+     source = "./terraform/ai-service-inventory-dashboard/org-dashboard"
+
+     member_account_ids = ["111111111111", "222222222222", "333333333333"]
+   }
+   ```
+   No StackSet is needed for this piece. It builds the widgets natively with
+   `for` expressions and `jsonencode()`.
+
+| Name | Default | Description |
+|---|---|---|
+| `dashboard_name` | `ai-service-inventory-org-dashboard` | Name of the cross-account dashboard |
+| `member_account_ids` | (required, at least one) | Member account IDs to include (the accounts running the collector and linked via OAM) |
+| `metric_namespace` | `AIServiceInventory` | Must match `metric_namespace` used for the collector in every member account |
+
+Output: `dashboard_url`.
+
+The org dashboard shows: the org-wide count of active service/region pairs,
+the number of active account/region pairs per service, active pairs per
+account, and one panel per service with one series per account **and**
+region (labelled `<account> - <region>`), so a service quietly in use in an
+unapproved region of a specific account stands out.
+
+**Scale limitation.** CloudWatch allows at most 500 metrics per dashboard
+widget, and this pattern uses one metric per account per series, so a widget
+with S series supports roughly 500/(S+1) accounts. The by-service summary
+widget here has 6 series (roughly 70 accounts). Also note that each
+per-service `SEARCH` returns one series per enabled region per account (the
+collector publishes a `0` for inactive regions too), so those panels reach
+the widget cap sooner; very large organizations should split accounts across
+several org-dashboards by applying this module multiple times with different
+`dashboard_name` and `member_account_ids` subsets.

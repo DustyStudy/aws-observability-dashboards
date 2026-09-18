@@ -1,0 +1,401 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Org-wide network exposure dashboard. Deploy this ONCE, in your central
+  monitoring account (the one holding the OAM sink - see
+  ../../org-observability/oam-sink), after every member account has both an
+  OAM Link (../../org-observability/oam-link) and the network-exposure
+  collector (collector.yaml in this folder) deployed via StackSets. This
+  template contains no scanning logic of its own - it only builds a
+  cross-account CloudWatch dashboard that reads the metrics (and, optionally,
+  the VPC Flow Logs log group) every linked account already holds locally.
+
+  CloudFormation's native intrinsic functions can't loop-generate JSON
+  content inside a DashboardBody string, so this uses a small Lambda-backed
+  custom resource to render the dashboard from a list of member account IDs
+  at deploy time. The Terraform version of this same dashboard
+  (terraform/network-exposure-dashboard/org-dashboard) does this natively
+  with a `for` expression - no custom resource needed there.
+
+Parameters:
+  DashboardName:
+    Type: String
+    Default: network-exposure-org-dashboard
+    Description: Name of the cross-account CloudWatch dashboard.
+
+  MemberAccountIds:
+    Type: CommaDelimitedList
+    Description: >-
+      Every member account ID whose network-exposure collector metrics (and,
+      optionally, VPC Flow Logs) should appear on this dashboard (the same
+      accounts you deployed collector.yaml and the OAM Link to). Does not
+      need to include the monitoring account itself unless it also runs its
+      own collector.
+
+  MetricNamespace:
+    Type: String
+    Default: NetworkExposure
+    Description: Must match the MetricNamespace parameter used when deploying collector.yaml in every member account.
+
+  FlowLogsLogGroupName:
+    Type: String
+    Default: ""
+    Description: >-
+      Name of the EXISTING CloudWatch Logs group your VPC Flow Logs deliver
+      to; the same name is queried in every member account (one log widget
+      per account per panel, since log widgets take a single accountId).
+      Leave blank to omit the three flow-log panels entirely.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 365
+    Description: Retention for the dashboard-generator Lambda's own log group.
+    AllowedValues:
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+Resources:
+  # ---------------------------------------------------------------------
+  # KMS key encrypting the generator Lambda's log group
+  # ---------------------------------------------------------------------
+  DashboardGeneratorKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts the ${DashboardName} generator Lambda's log group"
+      EnableKeyRotation: true
+      KeyPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowAccountKeyAdministration",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "AllowCloudWatchLogsToUseKey",
+              "Effect": "Allow",
+              "Principal": { "Service": "logs.${AWS::Region}.amazonaws.com" },
+              "Action": [
+                "kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*",
+                "kms:GenerateDataKey*", "kms:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowLambdaAndSqsServices",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com", "sqs.amazonaws.com"]
+              },
+              "Action": [
+                "kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*",
+                "kms:GenerateDataKey*", "kms:Describe*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+
+  DashboardGeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${DashboardName}-generator"
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt DashboardGeneratorKmsKey.Arn
+
+  DashboardGeneratorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${DashboardName}-generator-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref DashboardGeneratorKmsKey
+
+  # ---------------------------------------------------------------------
+  # IAM role for the generator Lambda — only touches the one dashboard it owns
+  # ---------------------------------------------------------------------
+  DashboardGeneratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${DashboardName}-generator-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: manage-this-dashboard-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:DeleteDashboards
+                  - cloudwatch:GetDashboard
+                Resource: !Sub "arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/${DashboardName}"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt DashboardGeneratorDlq.Arn
+
+  # ---------------------------------------------------------------------
+  # Generator Lambda — renders and applies the DashboardBody at deploy time
+  # ---------------------------------------------------------------------
+  DashboardGeneratorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DashboardGeneratorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              CloudFormation custom-resource Lambda that only calls the
+              regional CloudWatch control-plane API at deploy time; a VPC
+              would add nothing but a NAT gateway bill.
+          - id: CKV_AWS_272
+            comment: >-
+              No AWS Signer code-signing pipeline exists for this account;
+              out of scope for a public template repo since the profile ARN
+              is account-specific.
+    Properties:
+      FunctionName: !Sub "${DashboardName}-generator"
+      Description: CloudFormation custom-resource handler that builds and applies the org-wide network-exposure dashboard's DashboardBody.
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt DashboardGeneratorRole.Arn
+      ReservedConcurrentExecutions: 1
+      KmsKeyArn: !GetAtt DashboardGeneratorKmsKey.Arn
+      DeadLetterConfig:
+        TargetArn: !GetAtt DashboardGeneratorDlq.Arn
+      TracingConfig:
+        Mode: Active
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          cloudwatch = boto3.client("cloudwatch")
+
+          # CloudWatch dashboard limits this generator guards against up front, so an
+          # oversized org fails the deploy with a clear message instead of an opaque
+          # PutDashboard validation error.
+          MAX_WIDGETS_PER_DASHBOARD = 500
+          MAX_METRICS_PER_WIDGET = 500
+
+
+          def send_cfn_response(event, context, status, data=None, physical_resource_id=None, reason=None):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
+                  "PhysicalResourceId": physical_resource_id or event.get("PhysicalResourceId") or event["LogicalResourceId"],
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "NoEcho": False,
+                  "Data": data or {},
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  event["ResponseURL"], data=body, method="PUT",
+                  headers={"Content-Type": "", "Content-Length": str(len(body))},
+              )
+              urllib.request.urlopen(req)
+
+
+          # ---------------------------------------------------------------
+          # Widget builders. Every network-exposure metric is dimensioned by
+          # Region, so there are three widget shapes:
+          #   * 24h tiles  - one hidden per-account SEARCH (each carrying its own
+          #                  "accountId") plus one visible SUM() expression, giving
+          #                  a single org-wide number per tile.
+          #   * bar charts - one VISIBLE SEARCH per account, so per-account x
+          #                  per-region stays readable instead of collapsing.
+          #   * log panels - Logs Insights widgets take a single "accountId", so
+          #                  each panel is repeated once per member account.
+          # Each widget uses its own distinct id prefix; metric-math ids must be
+          # unique within one widget's metrics array. See
+          # ../../org-observability/README.md for the general recipe.
+          # ---------------------------------------------------------------
+          def _search(namespace, metric_name, stat):
+              return f"SEARCH('{{{namespace},Region}} MetricName=\"{metric_name}\"', '{stat}', 86400)"
+
+
+          def _tile_widget(x, y, w, h, title, label, namespace, metric_name, account_ids, region, id_prefix):
+              entries = []
+              ids = []
+              for i, acct in enumerate(account_ids):
+                  mid = f"{id_prefix}{i}"
+                  ids.append(mid)
+                  entries.append([{
+                      "expression": _search(namespace, metric_name, "Sum"),
+                      "id": mid, "accountId": acct, "visible": False,
+                  }])
+              entries.append([{
+                  "expression": f"SUM([{','.join(ids)}])",
+                  "label": label,
+                  "id": f"total_{id_prefix}",
+              }])
+              return {
+                  "type": "metric", "x": x, "y": y, "width": w, "height": h,
+                  "properties": {"title": title, "region": region, "view": "singleValue", "metrics": entries},
+              }
+
+
+          def _bar_widget(x, y, w, h, title, namespace, metric_name, account_ids, region, id_prefix):
+              metrics = []
+              for i, acct in enumerate(account_ids):
+                  metrics.append([{
+                      "expression": _search(namespace, metric_name, "Maximum"),
+                      "id": f"{id_prefix}{i}",
+                      "accountId": acct,
+                      "label": acct + " - ${PROP('Dim.Region')}",
+                  }])
+              return {
+                  "type": "metric", "x": x, "y": y, "width": w, "height": h,
+                  "properties": {"title": title, "region": region, "view": "bar", "metrics": metrics},
+              }
+
+
+          def _log_widgets(log_group, account_ids, region, start_y):
+              """One 12x6 widget per account per panel, two per row, panels stacked."""
+              if not log_group:
+                  return []
+              panels = [
+                  ("VPC Flow Logs – Rejected Connections Trend (hourly)", "timeSeries",
+                   f"SOURCE '{log_group}' | filter action = 'REJECT' | stats count(*) as rejected by bin(1h)"),
+                  ("VPC Flow Logs – Top Source IPs (Rejected)", "bar",
+                   f"SOURCE '{log_group}' | filter action = 'REJECT' | stats count(*) as rejected by srcAddr | sort rejected desc | limit 10"),
+                  ("VPC Flow Logs – Possible Port Scanning (>10 distinct dest ports)", "table",
+                   f"SOURCE '{log_group}' | filter action = 'REJECT' | stats count_distinct(dstPort) as uniquePorts, count(*) as attempts by srcAddr | filter uniquePorts > 10 | sort uniquePorts desc | limit 10"),
+              ]
+              height = 6
+              panel_height = -(-len(account_ids) // 2) * height  # ceil(N/2) rows of widgets
+              widgets = []
+              for p, (title, view, query) in enumerate(panels):
+                  for i, acct in enumerate(account_ids):
+                      widgets.append({
+                          "type": "log",
+                          "x": (i % 2) * 12,
+                          "y": start_y + p * panel_height + (i // 2) * height,
+                          "width": 12, "height": height,
+                          "properties": {
+                              "title": f"{title} - {acct}",
+                              "accountId": acct,
+                              "region": region,
+                              "view": view,
+                              "query": query,
+                          },
+                      })
+              return widgets
+
+
+          def build_dashboard_body(namespace, account_ids, region, flow_logs_log_group=""):
+              if not account_ids:
+                  raise ValueError("MemberAccountIds must contain at least one account ID.")
+
+              widgets = [
+                  _tile_widget(0, 0, 6, 4, "Open SG Rules – Sensitive Ports (24h, org-wide)", "Open Rules (org-wide)",
+                               namespace, "OpenSensitivePortRules", account_ids, region, "tosp"),
+                  _tile_widget(6, 0, 6, 4, "Public EC2 Instances (24h, org-wide)", "Public Instances (org-wide)",
+                               namespace, "PublicEc2Instances", account_ids, region, "tpe"),
+                  _tile_widget(12, 0, 6, 4, "Publicly Accessible RDS (24h, org-wide)", "Public RDS (org-wide)",
+                               namespace, "PubliclyAccessibleRdsInstances", account_ids, region, "tpr"),
+                  _tile_widget(18, 0, 6, 4, "Internet-Facing Load Balancers (24h, org-wide)", "Public LBs (org-wide)",
+                               namespace, "InternetFacingLoadBalancers", account_ids, region, "tlb"),
+                  _bar_widget(0, 4, 12, 6, "Open SG Rules (Sensitive Ports) by Account/Region",
+                              namespace, "OpenSensitivePortRules", account_ids, region, "bosp"),
+                  _bar_widget(12, 4, 12, 6, "Public EC2 Instances by Account/Region",
+                              namespace, "PublicEc2Instances", account_ids, region, "bpe"),
+                  _bar_widget(0, 10, 12, 6, "Publicly Accessible RDS by Account/Region",
+                              namespace, "PubliclyAccessibleRdsInstances", account_ids, region, "bpr"),
+                  _bar_widget(12, 10, 12, 6, "Internet-Facing Load Balancers by Account/Region",
+                              namespace, "InternetFacingLoadBalancers", account_ids, region, "blb"),
+                  _bar_widget(0, 16, 12, 6, "Publicly Accessible S3 Buckets by Account/(Bucket Home) Region",
+                              namespace, "PubliclyAccessibleS3Buckets", account_ids, region, "bs3"),
+              ]
+              # Metric widgets occupy rows 0-21 of the 24-column grid; log panels start below.
+              widgets.extend(_log_widgets(flow_logs_log_group, account_ids, region, 22))
+
+              if len(widgets) > MAX_WIDGETS_PER_DASHBOARD:
+                  raise ValueError(
+                      f"{len(widgets)} widgets exceeds CloudWatch's {MAX_WIDGETS_PER_DASHBOARD}-widget dashboard limit "
+                      f"({len(account_ids)} accounts; each flow-log panel adds one widget per account). "
+                      "Split MemberAccountIds across several org-dashboard stacks with different DashboardName values."
+                  )
+              for widget in widgets:
+                  count = len(widget["properties"].get("metrics", []))
+                  if count > MAX_METRICS_PER_WIDGET:
+                      raise ValueError(
+                          f"Widget '{widget['properties']['title']}' would need {count} metrics, over CloudWatch's "
+                          f"{MAX_METRICS_PER_WIDGET}-per-widget limit ({len(account_ids)} accounts). "
+                          "Split MemberAccountIds across several org-dashboard stacks with different DashboardName values."
+                      )
+              return {"widgets": widgets}
+
+
+          def handler(event, context):
+              request_type = event["RequestType"]
+              props = event.get("ResourceProperties", {})
+              dashboard_name = props["DashboardName"]
+
+              try:
+                  if request_type in ("Create", "Update"):
+                      namespace = props.get("MetricNamespace", "NetworkExposure")
+                      account_ids = props["MemberAccountIds"]
+                      if isinstance(account_ids, str):
+                          account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      flow_logs_log_group = props.get("FlowLogsLogGroupName", "").strip()
+                      region = props.get("Region") or context.invoked_function_arn.split(":")[3]
+
+                      body = build_dashboard_body(namespace, account_ids, region, flow_logs_log_group)
+                      cloudwatch.put_dashboard(DashboardName=dashboard_name, DashboardBody=json.dumps(body))
+                      send_cfn_response(event, context, "SUCCESS", physical_resource_id=dashboard_name)
+
+                  elif request_type == "Delete":
+                      physical_id = event.get("PhysicalResourceId", dashboard_name)
+                      try:
+                          cloudwatch.delete_dashboards(DashboardNames=[physical_id])
+                      except ClientError as exc:
+                          if exc.response["Error"]["Code"] not in ("ResourceNotFound", "ResourceNotFoundException"):
+                              raise
+                      send_cfn_response(event, context, "SUCCESS", physical_resource_id=physical_id)
+
+                  else:
+                      send_cfn_response(event, context, "SUCCESS", physical_resource_id=dashboard_name)
+
+              except Exception as exc:
+                  print(f"ERROR: {exc}")
+                  send_cfn_response(event, context, "FAILED", reason=str(exc),
+                                     physical_resource_id=event.get("PhysicalResourceId", dashboard_name))
+
+  # ---------------------------------------------------------------------
+  # The custom resource that actually triggers the Lambda above
+  # ---------------------------------------------------------------------
+  OrgDashboard:
+    Type: Custom::NetworkExposureOrgDashboard
+    Properties:
+      ServiceToken: !GetAtt DashboardGeneratorFunction.Arn
+      DashboardName: !Ref DashboardName
+      MemberAccountIds: !Join [",", !Ref MemberAccountIds]
+      MetricNamespace: !Ref MetricNamespace
+      FlowLogsLogGroupName: !Ref FlowLogsLogGroupName
+      Region: !Ref "AWS::Region"
+
+Outputs:
+  DashboardUrl:
+    Description: Console URL to open the cross-account dashboard directly
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${DashboardName}"

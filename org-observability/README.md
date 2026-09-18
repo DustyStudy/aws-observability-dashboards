@@ -120,12 +120,19 @@ intact at any scale.
    Terraform users: apply `terraform/nhi-governance-dashboard/org-dashboard/`
    directly (`member_account_ids` variable), no StackSets needed for this
    one piece since it only deploys once.
+   Every other dashboard follows the same layout: `org-dashboard.yaml` in
+   its `cloudformation/<dashboard>/` folder and an `org-dashboard/` module
+   in its `terraform/<dashboard>/` folder. Check each dashboard's README for
+   its extra inputs and its exact account limit.
 
-## Current status: three dashboards fully converted
+## Current status: all eight dashboards converted
 
-**nhi-governance-dashboard**, **agentic-ai-guardrails-dashboard**, and
-**fedramp-20x-audit-dashboard** are complete reference implementations,
-covering the widget patterns you'll need for the rest:
+Every dashboard in this repo has an org-dashboard in both CloudFormation
+(`org-dashboard.yaml`) and Terraform (`org-dashboard/`). Seven of them also
+have a per-account `collector.yaml`/`collector/`; the eighth,
+`agentic-ai-guardrails-dashboard`, needs no collector because Bedrock
+publishes its metrics natively. The first three below were the original
+reference implementations, covering the widget patterns the rest reuse:
 
 - **nhi-governance**: simple un-dimensioned metrics (`StaleAccessKeys`,
   `TotalIamRoles`, etc.) — the `metric_groups`/`_sum_across_accounts`
@@ -151,32 +158,35 @@ The first two were verified by extracting and actually *running* the
 widget-building logic against fake multi-account data (not just checking
 that the code compiles) — this caught a real bug during the nhi-governance
 build (metric math ID collisions when a single widget combines two metric
-groups) that a syntax check alone would have missed. fedramp-20x-audit's
-own widgets reuse that same `metric_groups`/`SUM()` construction rather
-than introducing new widget-building logic, but haven't been run through
-that same fake-multi-account test harness yet — worth doing before relying
-on it at scale.
+groups) that a syntax check alone would have missed. The other org-dashboards
+were built from these patterns and checked the same way: the inline Lambda's
+`build_dashboard_body` was run with fake accounts and the output asserted for
+valid JSON, unique metric IDs per widget, no overlapping widgets, and widget
+and metric counts under CloudWatch's limits, and the Terraform body was
+compared against it. None of them has been deployed to a live AWS
+Organization yet, so cross-account rendering (OAM-linked metrics and log
+widgets) is unconfirmed.
 
-The other five dashboards
-(`security-posture`, `bedrock-usage-cost`, `ai-service-inventory`,
-`network-exposure`, `eks-security`) have their `collector.yaml`/`collector/`
-already split out and ready for StackSets, but still need their
-`org-dashboard` built. Three of them
-(`security-posture`, `network-exposure`, `eks-security`) also include **log
-widgets** (Logs Insights over Security Hub/GuardDuty/Inspector/VPC Flow Log
-data), which need a third pattern not yet demonstrated here: CloudWatch's
-cross-account log widgets take a single `accountId` per widget (confirmed
-from AWS docs — not an array, and not a "search all accounts" mode), so the
-correct approach is one widget per account per log panel, rather than
-collapsing to a single number the way metrics can.
+The remaining five follow those patterns:
+
+- **security-posture**, **network-exposure**, **eks-security**: include **log
+  widgets** (Logs Insights over Security Hub/GuardDuty/Inspector/VPC Flow
+  Log data). CloudWatch's cross-account log widgets take a single
+  `accountId` per widget (confirmed from AWS docs — not an array, and not a
+  "search all accounts" mode), so these emit one widget per account per log
+  panel rather than collapsing to a single number the way metrics can.
+- **bedrock-usage-cost**: native Bedrock metrics via `SEARCH()` per account
+  (`SUM` for counts, `AVG` for latency) plus summed and per-account cost.
+- **ai-service-inventory**: per-account, per-region `SEARCH()` widgets so
+  you can see which accounts use which AI services in which regions.
 
 ### The recipe to convert another dashboard
 
 1. **Split the existing template**: copy `template.yaml`/`main.tf` to
    `collector.yaml`/`collector/`, delete the `AWS::CloudWatch::Dashboard` /
    `aws_cloudwatch_dashboard` resource and its outputs. That's the whole
-   collector — nothing else changes. (Already done for all seven dashboards
-   in this repo.)
+   collector — nothing else changes. (Already done for every dashboard that
+   needs a collector.)
 2. **Build the org-dashboard**:
    - **Terraform**: natively, with `for` expressions — see either
      `terraform/nhi-governance-dashboard/org-dashboard/main.tf` (simple
@@ -188,8 +198,9 @@ collapsing to a single number the way metrics can.
      matching `.yaml` files for the Python equivalents of the two patterns
      above.
    - **Log widgets**: one widget per account, each with its own `accountId`
-     and `region` in `properties` — not yet demonstrated in this repo, but
-     the schema is confirmed (AWS docs: `CloudWatch-Dashboard-Body-Structure.html`).
+     and `region` in `properties` — see the `security-posture`,
+     `network-exposure`, or `eks-security` org-dashboards (schema: AWS docs,
+     `CloudWatch-Dashboard-Body-Structure.html`).
 3. **Watch for ID collisions**: every metric-math `id` must be unique
    *within a single widget's metrics array*. If a widget combines two
    metric/search groups (e.g., "Total vs Stale" trend lines, or "OIDC vs
@@ -206,9 +217,15 @@ collapsing to a single number the way metrics can.
 - Cross-account metric retrieval has no additional CloudWatch charge
   beyond standard pricing, but counts toward the monitoring account's API
   call quotas — keep an eye on this with very large organizations.
-- A single dashboard widget supports up to 500 metrics, and a dashboard up
-  to 2,500 across all widgets. The `SUM()`-of-all-accounts pattern here
-  uses one metric per account per group, so this becomes a real ceiling
-  somewhere in the high hundreds of accounts — StackSets and OAM
-  themselves scale to 100,000 source accounts per sink, but a single
-  dashboard's widget math does not.
+- CloudWatch caps a metric widget at 500 metrics and a dashboard at 500
+  widgets. The dashboard schema takes one `accountId` per metric entry
+  (there is no "all accounts" value), so every org-dashboard here lists
+  member accounts explicitly and uses one metric per account per series.
+  A widget with S series therefore supports roughly 500/(S+1) accounts, and
+  dashboards with per-account log panels are capped lower still (each
+  dashboard's README and its variable validation give the exact figure).
+- StackSets and OAM themselves scale to 100,000 source accounts per sink,
+  but a single dashboard's widget math does not. For large organizations,
+  deploy the same org-dashboard several times with different
+  `DashboardName` and `MemberAccountIds` (`member_account_ids`) subsets,
+  for example one per business unit or OU.
