@@ -35,21 +35,20 @@ Each dashboard folder is self-contained and deployable on its own.
 
 | Dashboard | Status | Org-wide | Description |
 |---|---|---|---|
-| [security-posture-dashboard](cloudformation/security-posture-dashboard) | ✅ Built | Collector only | Security Hub findings + GuardDuty findings — severity breakdown, top failing controls, findings by type, trend over time |
-| [bedrock-usage-cost-dashboard](cloudformation/bedrock-usage-cost-dashboard) | ✅ Built | Collector only | Bedrock invocations, tokens, latency, errors/throttles by model (native metrics), plus estimated daily cost by usage type via a scheduled Cost Explorer collector |
+| [security-posture-dashboard](cloudformation/security-posture-dashboard) | ✅ Built | ✅ Full | Security Hub findings + GuardDuty findings — severity breakdown, top failing controls, findings by type, trend over time |
+| [bedrock-usage-cost-dashboard](cloudformation/bedrock-usage-cost-dashboard) | ✅ Built | ✅ Full | Bedrock invocations, tokens, latency, errors/throttles by model (native metrics), plus estimated daily cost by usage type via a scheduled Cost Explorer collector |
 | [agentic-ai-guardrails-dashboard](cloudformation/agentic-ai-guardrails-dashboard) | ✅ Built | ✅ Full | Bedrock Agents activity (invocations, latency, token usage, model-call health) + Bedrock Guardrails behavior (intervention rate, interventions by policy category, latency/errors) |
-| [ai-service-inventory-dashboard](cloudformation/ai-service-inventory-dashboard) | ✅ Built | Collector only | Which regions actually have Bedrock, Bedrock Agents, Bedrock Guardrails, Rekognition, Comprehend, or Textract in active use — shadow AI adoption tracking via a scheduled multi-region CloudWatch scan |
-| [network-exposure-dashboard](cloudformation/network-exposure-dashboard) | ✅ Built | Collector only | Internet-open security groups, public EC2/RDS/load balancers, exposed S3 buckets by region, plus optional VPC Flow Log rejected-connection trends and port-scan detection |
+| [ai-service-inventory-dashboard](cloudformation/ai-service-inventory-dashboard) | ✅ Built | ✅ Full | Which regions actually have Bedrock, Bedrock Agents, Bedrock Guardrails, Rekognition, Comprehend, or Textract in active use — shadow AI adoption tracking via a scheduled multi-region CloudWatch scan |
+| [network-exposure-dashboard](cloudformation/network-exposure-dashboard) | ✅ Built | ✅ Full | Internet-open security groups, public EC2/RDS/load balancers, exposed S3 buckets by region, plus optional VPC Flow Log rejected-connection trends and port-scan detection |
 | [nhi-governance-dashboard](cloudformation/nhi-governance-dashboard) | ✅ Built | ✅ Full | Non-human identity risk: stale/unrotated access keys, users without MFA, inactive IAM users, stale IAM roles, external-trust roles, workload identity federation footprint, Secrets Manager rotation status |
-| [eks-security-dashboard](cloudformation/eks-security-dashboard) | ✅ Built | Collector only | EKS cluster/nodegroup Kubernetes version drift, stale node AMIs, nodegroup health issues, public-only API endpoints, GuardDuty EKS Protection findings, Inspector container image vulnerabilities |
+| [eks-security-dashboard](cloudformation/eks-security-dashboard) | ✅ Built | ✅ Full | EKS cluster/nodegroup Kubernetes version drift, stale node AMIs, nodegroup health issues, public-only API endpoints, GuardDuty EKS Protection findings, Inspector container image vulnerabilities |
 | [fedramp-20x-audit-dashboard](cloudformation/fedramp-20x-audit-dashboard) | ✅ Built | ✅ Full | Continuous audit evidence for FedRAMP 20x Key Security Indicators (KSIs), scanned across every enabled region, not just one, across 16 AWS services: Config compliance/auto-remediation, CloudTrail health, Backup coverage/outcomes, Access Analyzer findings, RDS/ASG HA posture, VPC endpoint/NACL posture, ACM/S3 secure-transport checks, a Security Hub pass/fail score, account-wide Inspector findings, EC2 instance-profile coverage, Trusted Advisor, whether GuardDuty/Security Hub/Inspector are actually enabled, EBS/RDS/S3 encryption defaults, IAM password policy strength — plus widgets pulling in this repo's other dashboards — every widget titled with the specific KSI ID it evidences |
 
-"Org-wide" refers to the multi-account setup described below: three
-dashboards (`nhi-governance`, `agentic-ai-guardrails`, `fedramp-20x-audit`)
-have a complete central-account version today; the other five have their
-per-account collector half already split out and ready under
-[`org-observability/`](org-observability/README.md), with the
-org-dashboard side documented but not yet built for each.
+"Org-wide" refers to the multi-account setup described below: every
+dashboard here has a per-account collector (where one is needed) plus a
+central org-dashboard that shows all member accounts together, in both
+CloudFormation and Terraform. See
+[`org-observability/`](org-observability/README.md) for the rollout steps.
 
 All five dashboards from the original roadmap are built, plus a sixth
 (nhi-governance) for non-human identity, a seventh (eks-security) for
@@ -169,9 +168,18 @@ Both run in CI on every push/PR (the `lambda-tests` job).
   account**, which some locked-down or FedRAMP-boundary AWS Organizations
   restrict. If that's your environment, expect to adapt the org-dashboard
   deployment step rather than run it as-is.
-- **Only 3 of 8 dashboards have a finished org-wide version** today (see
-  the "Org-wide" column above) — the rest have the per-account collector
-  half ready but need their central org-dashboard built.
+- **Org-dashboards list member accounts explicitly, so each has a ceiling.**
+  CloudWatch allows 500 metrics per widget and 500 widgets per dashboard,
+  and the dashboard schema takes one `accountId` per metric (there is no
+  "all accounts" value). A metric widget with S series therefore supports
+  roughly 500/(S+1) accounts, and dashboards with per-account log panels
+  are capped lower (each org-dashboard's README gives its exact limit).
+  Very large organizations should deploy the org-dashboard several times
+  with different account subsets.
+- **The org-dashboards have not been deployed to a live AWS Organization.**
+  They are linted, validated, and their generated dashboard bodies are
+  checked structurally in CI-equivalent runs, but cross-account rendering
+  (OAM-linked metrics and log widgets) needs a real org to confirm.
 
 ## License
 
