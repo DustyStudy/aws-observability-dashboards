@@ -295,7 +295,7 @@ Resources:
                 "region": "${AWS::Region}",
                 "view": "bar",
                 "metrics": [
-                  [ { "expression": "SEARCH('{${MetricNamespace},Region} MetricName=\"ServiceActive\"', 'Sum', 86400)", "label": "Active Services", "id": "e1" } ]
+                  [ { "expression": "SELECT SUM(ServiceActive) FROM SCHEMA(\"${MetricNamespace}\", Region, Service) GROUP BY Region", "label": "Active Services", "id": "q1", "period": 86400 } ]
                 ]
               }
             },

@@ -259,7 +259,7 @@ resource "aws_cloudwatch_dashboard" "ai_service_inventory" {
           region = data.aws_region.current.name
           view   = "bar"
           metrics = [
-            [{ expression = "SEARCH('{${var.metric_namespace},Region} MetricName=\"ServiceActive\"', 'Sum', 86400)", label = "Active Services", id = "e1" }],
+            [{ expression = "SELECT SUM(ServiceActive) FROM SCHEMA(\"${var.metric_namespace}\", Region, Service) GROUP BY Region", label = "Active Services", id = "q1", period = 86400 }],
           ]
         }
       },
