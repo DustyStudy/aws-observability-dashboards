@@ -55,6 +55,8 @@ module "fedramp_20x_audit_collector" {
 module "fedramp_20x_audit_org_dashboard" {
   source = "./terraform/fedramp-20x-audit-dashboard/org-dashboard"
 
+  # Leave member_account_ids out (or []) to show every linked account; list
+  # account IDs to restrict the dashboard to them. See the two modes below.
   member_account_ids                = ["111111111111", "222222222222"]
   metric_namespace                  = "FedRAMP20xAudit"
   nhi_governance_namespace          = "NHIGovernance"
@@ -65,6 +67,42 @@ module "fedramp_20x_audit_org_dashboard" {
 
 See [`../../org-observability/README.md`](../../org-observability/README.md)
 for the OAM Sink/Link setup this depends on.
+
+`org-dashboard/` has two modes, chosen by `member_account_ids`:
+
+- **All accounts (default, `member_account_ids = []`)**: each widget is a
+  CloudWatch Metrics Insights query over every account linked to the
+  monitoring account, for example
+  `SELECT SUM(ConfigRulesNonCompliant) FROM SCHEMA("FedRAMP20xAudit")`.
+  The network-exposure metrics are Region-dimensioned, so they use
+  `SCHEMA("NetworkExposure", Region)` (summed across regions), and the Open
+  Security Group Rules panel adds `GROUP BY AWS.AccountId, Region`. The
+  Security Hub standards score is a percentage, so it uses
+  `AVG(SecurityHubStandardsScorePercent)` across accounts instead of `SUM`.
+  There is no account list to maintain and no per-widget account ceiling.
+- **Explicit list (`member_account_ids = ["111111111111", ...]`)**: one
+  metric per account per series, limited to roughly 500/(series+1) accounts
+  per widget. This is the behavior the dashboard had before all-accounts
+  mode existed.
+
+All-accounts mode is new and has **not been verified against a live AWS
+Organization**. Things to know before relying on it:
+
+- Metrics Insights returns at most 500 time series per query; totals are
+  unaffected, but the per-account Open Security Group Rules breakdown is
+  truncated beyond that.
+- Each total is a `SUM` over the period (86400 s). This dashboard's
+  collector publishes each metric once per schedule (`rate(1 day)` by
+  default; the multi-region collector publishes a single account-wide value
+  per metric with the Region merged), so this is correct as long as the
+  schedule is not shorter than one day; a shorter schedule would count an
+  account more than once per period. The same applies to the
+  nhi-governance, network-exposure and security-posture collectors whose
+  metrics this dashboard also reads. The security-posture finding counts are
+  event counts, so their `SUM` over the period is exact.
+- The queries also include any metrics the monitoring account itself
+  publishes in these namespaces.
+- Use the explicit list to restrict the dashboard to specific accounts.
 
 ## Variables
 

@@ -168,18 +168,26 @@ Both run in CI on every push/PR (the `lambda-tests` job).
   account**, which some locked-down or FedRAMP-boundary AWS Organizations
   restrict. If that's your environment, expect to adapt the org-dashboard
   deployment step rather than run it as-is.
-- **Org-dashboards list member accounts explicitly, so each has a ceiling.**
-  CloudWatch allows 500 metrics per widget and 500 widgets per dashboard,
-  and the dashboard schema takes one `accountId` per metric (there is no
-  "all accounts" value). A metric widget with S series therefore supports
-  roughly 500/(S+1) accounts, and dashboards with per-account log panels
-  are capped lower (each org-dashboard's README gives its exact limit).
-  Very large organizations should deploy the org-dashboard several times
-  with different account subsets.
+- **Org-dashboards default to an "all accounts" mode that has not been
+  verified.** With no account list, each org-dashboard uses CloudWatch
+  Metrics Insights queries (`GROUP BY AWS.AccountId` where a breakdown is
+  shown) over every account linked to the monitoring account, so there is
+  no per-widget account ceiling. Queries return at most 500 time series,
+  so per-account breakdowns truncate in very large orgs (totals don't),
+  and totals are sums over the period, which assumes each collector
+  publishes at most once per period (the default is daily). Log panels
+  (security-posture, network-exposure, eks-security) can't be queried this
+  way, so they are per-account and driven by a separate log account list.
+- **An explicit account list is still supported** and behaves as before:
+  one metric per account per series, so a widget with S series supports
+  roughly 500/(S+1) accounts (CloudWatch allows 500 metrics per widget and
+  500 widgets per dashboard). Use it to restrict a dashboard to specific
+  accounts, or split a very large org across several dashboards.
 - **The org-dashboards have not been deployed to a live AWS Organization.**
   They are linted, validated, and their generated dashboard bodies are
   checked structurally in CI-equivalent runs, but cross-account rendering
-  (OAM-linked metrics and log widgets) needs a real org to confirm.
+  (OAM-linked metrics, Metrics Insights queries, and log widgets) needs a
+  real org to confirm.
 
 ## License
 

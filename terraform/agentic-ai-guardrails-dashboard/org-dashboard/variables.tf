@@ -5,11 +5,12 @@ variable "dashboard_name" {
 }
 
 variable "member_account_ids" {
-  description = "Every member account ID to include on this dashboard."
+  description = "Leave empty (the default) to show every account linked to this monitoring account, using CloudWatch Metrics Insights queries that group by account. Or list specific 12-digit account IDs to show only those, one metric per account (limited to roughly 500/(series+1) accounts per widget)."
   type        = list(string)
+  default     = []
 
   validation {
-    condition     = length(var.member_account_ids) > 0
-    error_message = "member_account_ids must contain at least one account ID."
+    condition     = alltrue([for a in var.member_account_ids : can(regex("^[0-9]{12}$", a))])
+    error_message = "Every member_account_ids entry must be a 12-digit AWS account ID."
   }
 }

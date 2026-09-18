@@ -25,12 +25,24 @@ data "aws_region" "current" {}
 #    (UsageType=TOTAL), so one hidden per-account metric entry (each
 #    carrying its own "accountId") plus one visible SUM() expression.
 #
+# In all-accounts mode (member_account_ids = []) every widget is instead one
+# CloudWatch Metrics Insights query per series, which spans every account
+# linked to this monitoring account (SELECT ... FROM SCHEMA(...) [GROUP BY
+# AWS.AccountId ...]); see local.all_accounts below.
+#
 # Metric-math IDs must be unique within a single widget. Every ID is built
 # as "<id_prefix>_<index>" and every id_prefix below is distinct and free
 # of underscores/digits, so IDs can never collide even if a widget
 # combines several groups (e.g. input vs output tokens).
 # -----------------------------------------------------------------------
 locals {
+  # With no member_account_ids the dashboard queries every account linked to
+  # this monitoring account through CloudWatch Metrics Insights
+  # (SELECT ... GROUP BY AWS.AccountId) instead of listing accounts one by
+  # one, so it is not bound by the per-widget metric limit. With a list, it
+  # keeps the explicit per-account approach below.
+  all_accounts = length(var.member_account_ids) == 0
+
   bedrock = "AWS/Bedrock"
 
   search_specs = {
@@ -63,15 +75,35 @@ locals {
   }
 
   search_group_totals = {
-    for key, spec in local.search_specs : key => [[{
-      expression = "${spec.combine}([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}_${i}"])}])"
-      label      = spec.label
-      id         = "total_${spec.id_prefix}"
-    }]]
+    for key, spec in local.search_specs : key => [
+      for _ in [1] : [{
+        expression = "${spec.combine}([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}_${i}"])}])"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+      }] if !local.all_accounts
+    ]
+  }
+
+  # All-accounts mode: one Metrics Insights query per series. SCHEMA lists
+  # the exact dimension set of the AWS/Bedrock metrics (ModelId). SUM for
+  # counts, AVG for latency (spec.combine is already SUM or AVG).
+  search_group_insights = {
+    for key, spec in local.search_specs : key => [
+      for _ in [1] : [{
+        expression = "SELECT ${spec.combine}(${spec.metric_name}) FROM SCHEMA(\"${local.bedrock}\", ModelId)"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+        period     = spec.period
+      }] if local.all_accounts
+    ]
   }
 
   search_groups = {
-    for key, spec in local.search_specs : key => concat(local.search_group_accounts[key], local.search_group_totals[key])
+    for key, spec in local.search_specs : key => concat(
+      local.search_group_accounts[key],
+      local.search_group_totals[key],
+      local.search_group_insights[key],
+    )
   }
 
   # Un-dimensioned-style cost metric: N hidden per-account entries + 1
@@ -86,48 +118,103 @@ locals {
   }
 
   metric_group_totals = {
-    for key, spec in local.metric_specs : key => [[{
-      expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}_${i}"])}])"
-      label      = spec.label
-      id         = "total_${spec.id_prefix}"
-    }]]
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}_${i}"])}])"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+      }] if !local.all_accounts
+    ]
+  }
+
+  # All-accounts mode: the collector's fully-specified metric
+  # (UsageType=TOTAL) summed across every linked account in one query.
+  metric_group_insights = {
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "SELECT SUM(${spec.metric_name}) FROM SCHEMA(\"${var.metric_namespace}\", UsageType) WHERE UsageType = '${spec.usage_type}'"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+        period     = 86400
+      }] if local.all_accounts
+    ]
   }
 
   metric_groups = {
-    for key, spec in local.metric_specs : key => concat(local.metric_group_accounts[key], local.metric_group_totals[key])
+    for key, spec in local.metric_specs : key => concat(
+      local.metric_group_accounts[key],
+      local.metric_group_totals[key],
+      local.metric_group_insights[key],
+    )
   }
 
   # Invocations by model: variable series per account (one per ModelId), so
   # this stays as one visible SEARCH per account, labelled "<account> -
   # <model>", rather than collapsing to a sum.
-  invocations_by_model_metrics = [
-    for i, acct in var.member_account_ids : [{
-      expression = "SEARCH('{${local.bedrock},ModelId} MetricName=\"Invocations\"', 'Sum', 300)"
-      id         = "invm_${i}"
-      accountId  = acct
-      label      = "${acct} - $${PROP('Dim.ModelId')}"
-    }]
-  ]
+  #
+  # All-accounts mode: a single query grouped by account and model. The
+  # ORDER BY ... LIMIT 500 keeps the top 500 series by volume (500 is the
+  # Metrics Insights per-query maximum) instead of an arbitrary subset.
+  invocations_by_model_metrics = concat(
+    [
+      for i, acct in var.member_account_ids : [{
+        expression = "SEARCH('{${local.bedrock},ModelId} MetricName=\"Invocations\"', 'Sum', 300)"
+        id         = "invm_${i}"
+        accountId  = acct
+        label      = "${acct} - $${PROP('Dim.ModelId')}"
+      }]
+    ],
+    [
+      for _ in [1] : [{
+        expression = "SELECT SUM(Invocations) FROM SCHEMA(\"${local.bedrock}\", ModelId) GROUP BY AWS.AccountId, ModelId ORDER BY SUM() DESC LIMIT 500"
+        id         = "invm_all"
+        period     = 300
+      }] if local.all_accounts
+    ],
+  )
 
   # Cost attribution per account: each account's own TOTAL series, shown
   # side by side (the main org use case for this dashboard).
-  cost_per_account_metrics = [
-    for i, acct in var.member_account_ids : [
-      var.metric_namespace, "EstimatedDailyCostUSD", "UsageType", "TOTAL",
-      { stat = "Maximum", period = 86400, accountId = acct, id = "cacct_${i}", label = acct }
-    ]
-  ]
+  #
+  # All-accounts mode: GROUP BY AWS.AccountId, top 500 accounts by cost.
+  cost_per_account_metrics = concat(
+    [
+      for i, acct in var.member_account_ids : [
+        var.metric_namespace, "EstimatedDailyCostUSD", "UsageType", "TOTAL",
+        { stat = "Maximum", period = 86400, accountId = acct, id = "cacct_${i}", label = acct }
+      ]
+    ],
+    [
+      for _ in [1] : [{
+        expression = "SELECT SUM(EstimatedDailyCostUSD) FROM SCHEMA(\"${var.metric_namespace}\", UsageType) WHERE UsageType = 'TOTAL' GROUP BY AWS.AccountId ORDER BY SUM() DESC LIMIT 500"
+        id         = "cacct_all"
+        period     = 86400
+      }] if local.all_accounts
+    ],
+  )
 
   # Cost by usage type: variable series per account (one per UsageType),
   # so one visible SEARCH per account rather than a sum.
-  cost_by_usage_type_metrics = [
-    for i, acct in var.member_account_ids : [{
-      expression = "SEARCH('{${var.metric_namespace},UsageType} MetricName=\"EstimatedDailyCostUSD\"', 'Maximum', 86400)"
-      id         = "cuse_${i}"
-      accountId  = acct
-      label      = "${acct} - $${PROP('Dim.UsageType')}"
-    }]
-  ]
+  #
+  # All-accounts mode: GROUP BY AWS.AccountId, UsageType (this includes the
+  # TOTAL series, exactly like the explicit SEARCH does), top 500 by cost.
+  cost_by_usage_type_metrics = concat(
+    [
+      for i, acct in var.member_account_ids : [{
+        expression = "SEARCH('{${var.metric_namespace},UsageType} MetricName=\"EstimatedDailyCostUSD\"', 'Maximum', 86400)"
+        id         = "cuse_${i}"
+        accountId  = acct
+        label      = "${acct} - $${PROP('Dim.UsageType')}"
+      }]
+    ],
+    [
+      for _ in [1] : [{
+        expression = "SELECT SUM(EstimatedDailyCostUSD) FROM SCHEMA(\"${var.metric_namespace}\", UsageType) GROUP BY AWS.AccountId, UsageType ORDER BY SUM() DESC LIMIT 500"
+        id         = "cuse_all"
+        period     = 86400
+      }] if local.all_accounts
+    ],
+  )
 }
 
 resource "aws_cloudwatch_dashboard" "bedrock_usage_cost_org" {

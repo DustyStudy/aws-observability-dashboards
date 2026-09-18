@@ -13,6 +13,11 @@ Description: >
   are summed across accounts with SUM(); latency-style metrics are averaged
   with AVG() — summing averages across accounts would be meaningless.
 
+  With MemberAccountIds left empty the dashboard uses CloudWatch Metrics
+  Insights queries (SELECT ... GROUP BY AWS.AccountId) that span every
+  account linked to this monitoring account; with a list it builds one
+  metric per account.
+
 Parameters:
   DashboardName:
     Type: String
@@ -21,7 +26,13 @@ Parameters:
 
   MemberAccountIds:
     Type: CommaDelimitedList
-    Description: Every member account ID to include on this dashboard.
+    Default: ""
+    Description: >-
+      Leave empty (the default) to show every account linked to this
+      monitoring account, using CloudWatch Metrics Insights queries that
+      group by account. Or list specific 12-digit account IDs to show only
+      those, one metric per account (limited to roughly 500/(series+1)
+      accounts per widget).
 
   LogRetentionDays:
     Type: Number
@@ -153,6 +164,7 @@ Resources:
       Code:
         ZipFile: |
           import json
+          import re
           import urllib.request
 
           import boto3
@@ -192,6 +204,16 @@ Resources:
           # ---------------------------------------------------------------
           def combine_search(namespace, dimension, metric_name, account_ids, label,
                               stat="Sum", period=300, combine="SUM", id_prefix="m"):
+              if not account_ids:
+                  # All-accounts mode: one Metrics Insights query over every
+                  # account linked to this monitoring account. SCHEMA lists
+                  # the exact dimension set the metric is published with.
+                  return [[{
+                      "expression": f'SELECT {combine}({metric_name}) FROM SCHEMA("{namespace}", {dimension})',
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": period,
+                  }]]
               entries = []
               ids = []
               for i, acct in enumerate(account_ids):
@@ -214,6 +236,12 @@ Resources:
           # show one SEARCH per account side by side instead.
           def search_per_account(namespace, dimension, metric_name, account_ids,
                                   stat="Sum", period=300, id_prefix="p"):
+              if not account_ids:
+                  return [[{
+                      "expression": f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}", {dimension}) GROUP BY AWS.AccountId, {dimension}',
+                      "id": f"{id_prefix}_all",
+                      "period": period,
+                  }]]
               return [
                   [{
                       "expression": f"SEARCH('{{{namespace},{dimension}}} MetricName=\"{metric_name}\"', '{stat}', {period})",
@@ -318,9 +346,13 @@ Resources:
 
               try:
                   if request_type in ("Create", "Update"):
-                      account_ids = props["MemberAccountIds"]
+                      account_ids = props.get("MemberAccountIds", [])
                       if isinstance(account_ids, str):
                           account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      account_ids = [a for a in account_ids if a]
+                      for a in account_ids:
+                          if not re.fullmatch(r"[0-9]{12}", a):
+                              raise ValueError(f"Invalid account ID: {a!r}")
                       region = props.get("Region") or context.invoked_function_arn.split(":")[3]
 
                       body = build_dashboard_body(account_ids, region)

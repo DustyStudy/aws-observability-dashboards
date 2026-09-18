@@ -8,8 +8,10 @@ Description: >
   collector publishes locally. Uses a Lambda-backed custom resource to render
   the DashboardBody, since CloudFormation can't loop-generate JSON (the
   Terraform version does this natively). Metrics are summed across accounts;
-  log widgets take a single accountId, so each log panel is rendered once
-  per member account.
+  with no MemberAccountIds they are CloudWatch Metrics Insights queries over
+  every linked account. Log widgets take a single accountId, so each log
+  panel is rendered once per log account (LogAccountIds, or MemberAccountIds
+  when that is empty).
 
 Parameters:
   DashboardName:
@@ -19,13 +21,27 @@ Parameters:
 
   MemberAccountIds:
     Type: CommaDelimitedList
+    Default: ""
     Description: >-
-      Every member account ID whose security-posture collector metrics and
-      logs should appear on this dashboard (the same accounts you deployed
-      collector.yaml and the OAM Link to). Does not need to include the
-      monitoring account itself unless it also runs its own collector. Each
-      account adds 5 log widgets and a dashboard holds at most 500 widgets,
-      so at most 99 accounts fit on one dashboard.
+      Leave empty (the default) to show every account linked to this
+      monitoring account, using CloudWatch Metrics Insights queries that
+      group by account. Or list specific 12-digit account IDs to show only
+      those, one metric per account (limited to roughly 500/(series+1)
+      accounts per widget). Log panels are always per-account: they are
+      emitted for LogAccountIds if set, else for these accounts (up to 99,
+      since each account adds 5 log widgets and a dashboard holds at most
+      500 widgets).
+
+  LogAccountIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      Optional 12-digit account IDs to get per-account Logs Insights panels
+      (a CloudWatch log widget takes a single accountId, so all-accounts mode
+      cannot enumerate accounts for logs). If empty, log panels are emitted
+      for MemberAccountIds; when that is also empty (all-accounts mode) there
+      are no log panels. Each account adds 5 log widgets and a dashboard
+      holds at most 500 widgets, so at most 99 accounts.
 
   MetricNamespace:
     Type: String
@@ -181,6 +197,7 @@ Resources:
       Code:
         ZipFile: |
           import json
+          import re
           import urllib.request
 
           import boto3
@@ -218,8 +235,19 @@ Resources:
           # widgets: replace a single-account metric entry with one entry
           # per account (each carrying its own "accountId"), then combine
           # with metric math. See ../../org-observability/README.md.
+          # With no account IDs (all-accounts mode) a single CloudWatch
+          # Metrics Insights query over every linked account is used instead.
           # ---------------------------------------------------------------
           def _sum_across_accounts(namespace, metric_name, account_ids, label, stat="Sum", period=86400, id_prefix="m"):
+              if not account_ids:
+                  # All-accounts mode: one Metrics Insights query over every
+                  # account linked to this monitoring account.
+                  return [[{
+                      "expression": f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}")',
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": period,
+                  }]]
               entries = []
               ids = []
               for i, acct in enumerate(account_ids):
@@ -250,9 +278,10 @@ Resources:
           # ---------------------------------------------------------------
           # Log widgets. A CloudWatch log widget takes a single "accountId",
           # so Logs Insights panels cannot be collapsed across accounts the
-          # way metrics can. Emit one widget per member account per panel,
-          # each carrying that account's ID in its title and "accountId" in
-          # its properties, laid out in a grid on the 24-column dashboard.
+          # way metrics can (and Metrics Insights does not apply to logs).
+          # Emit one widget per log account per panel, each carrying that
+          # account's ID in its title and "accountId" in its properties,
+          # laid out in a grid on the 24-column dashboard.
           # ---------------------------------------------------------------
           def _log_panels(name_prefix):
               sechub = f"/observability/{name_prefix}/security-hub-findings"
@@ -295,9 +324,21 @@ Resources:
               return widgets
 
 
-          def build_dashboard_body(namespace, name_prefix, account_ids, region):
-              if not account_ids:
-                  raise ValueError("MemberAccountIds must contain at least one account ID")
+          def _log_note_widget(y):
+              # Shown in all-accounts mode with no LogAccountIds, so the
+              # missing log panels are a visible gap rather than a silent one.
+              return {
+                  "type": "text", "x": 0, "y": y, "width": 24, "height": 2,
+                  "properties": {
+                      "markdown": "Log panels are per-account: set `log_account_ids` to add per-account Logs Insights panels.",
+                  },
+              }
+
+
+          def build_dashboard_body(namespace, name_prefix, account_ids, region, log_account_ids=None):
+              # Log panels: LogAccountIds if given, else MemberAccountIds
+              # (explicit mode, unchanged); none in all-accounts mode.
+              log_accounts = log_account_ids or account_ids
               widgets = [
                   _single_value_widget(0, 0, 8, 4, "Security Hub – Critical (24h, org-wide)", namespace,
                                        "SecurityHubCriticalFindings", account_ids, region, "shc"),
@@ -306,14 +347,23 @@ Resources:
                   _single_value_widget(16, 0, 8, 4, "GuardDuty – High Severity (24h, org-wide)", namespace,
                                        "GuardDutyHighSeverityFindings", account_ids, region, "gdh"),
               ]
-              widgets.extend(_log_widgets(name_prefix, account_ids, region, start_y=4))
+              if not log_accounts:
+                  widgets.append(_log_note_widget(4))
+              widgets.extend(_log_widgets(name_prefix, log_accounts, region, start_y=4))
               if len(widgets) > MAX_WIDGETS:
                   raise ValueError(
                       f"{len(widgets)} widgets exceeds the {MAX_WIDGETS}-widget dashboard limit "
-                      f"(3 metric widgets + 5 log widgets per account); split MemberAccountIds "
-                      f"across several org-dashboard stacks"
+                      f"(3 metric widgets + 5 log widgets per log account); split LogAccountIds "
+                      f"(or MemberAccountIds when LogAccountIds is empty) across several "
+                      f"org-dashboard stacks"
                   )
               return {"widgets": widgets}
+
+
+          def _parse_ids(value):
+              if isinstance(value, str):
+                  value = value.split(",")
+              return [a.strip() for a in value if a and a.strip()]
 
 
           def handler(event, context):
@@ -325,12 +375,16 @@ Resources:
                   if request_type in ("Create", "Update"):
                       namespace = props.get("MetricNamespace", "SecurityObservability")
                       name_prefix = props.get("NamePrefix", "security-posture")
-                      account_ids = props["MemberAccountIds"]
-                      if isinstance(account_ids, str):
-                          account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      account_ids = _parse_ids(props.get("MemberAccountIds", []))
+                      log_account_ids = _parse_ids(props.get("LogAccountIds", []))
+                      if not re.fullmatch(r"[A-Za-z0-9_./-]+", namespace):
+                          raise ValueError("MetricNamespace may only contain letters, numbers, underscores, dots, slashes, and hyphens")
+                      for a in account_ids + log_account_ids:
+                          if not re.fullmatch(r"[0-9]{12}", a):
+                              raise ValueError(f"Invalid account ID: {a!r}")
                       region = props.get("Region") or context.invoked_function_arn.split(":")[3]
 
-                      body = build_dashboard_body(namespace, name_prefix, account_ids, region)
+                      body = build_dashboard_body(namespace, name_prefix, account_ids, region, log_account_ids)
                       cloudwatch.put_dashboard(DashboardName=dashboard_name, DashboardBody=json.dumps(body))
                       send_cfn_response(event, context, "SUCCESS", physical_resource_id=dashboard_name)
 
@@ -360,6 +414,7 @@ Resources:
       ServiceToken: !GetAtt DashboardGeneratorFunction.Arn
       DashboardName: !Ref DashboardName
       MemberAccountIds: !Join [",", !Ref MemberAccountIds]
+      LogAccountIds: !Join [",", !Ref LogAccountIds]
       MetricNamespace: !Ref MetricNamespace
       NamePrefix: !Ref NamePrefix
       Region: !Ref "AWS::Region"

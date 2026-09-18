@@ -14,12 +14,20 @@ data "aws_region" "current" {}
 # -----------------------------------------------------------------------
 # Same "hidden per-account entry + one visible SUM() expression" recipe
 # used by every org-dashboard module in this repo (see
-# ../../nhi-governance-dashboard/org-dashboard/main.tf for the original).
+# ../../nhi-governance-dashboard/org-dashboard/main.tf for the original),
+# plus an all-accounts mode that replaces it with Metrics Insights queries.
 # This dashboard reads four different namespaces (this module's own audit
 # metrics, plus nhi-governance, network-exposure, and security-posture's),
 # so each spec carries its own `namespace` instead of a single shared one.
 # -----------------------------------------------------------------------
 locals {
+  # With no member_account_ids the dashboard queries every account linked to
+  # this monitoring account through CloudWatch Metrics Insights
+  # (SELECT ... FROM SCHEMA(...)) instead of listing accounts one by one, so
+  # it is not bound by the per-widget metric limit. With a list, it keeps
+  # the explicit per-account approach below.
+  all_accounts = length(var.member_account_ids) == 0
+
   metric_specs = {
     non_compliant    = { namespace = var.metric_namespace, metric_name = "ConfigRulesNonCompliant", stat = "Maximum", id_prefix = "cnc", label = "Config Rules Non-Compliant (KSI-MLA-EVC, KSI-SVC-ACM)" }
     compliant        = { namespace = var.metric_namespace, metric_name = "ConfigRulesCompliant", stat = "Maximum", id_prefix = "cc", label = "Compliant Rules" }
@@ -73,29 +81,65 @@ locals {
   }
 
   metric_group_totals = {
-    for key, spec in local.metric_specs : key => [[{
-      expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
-      label      = spec.label
-      id         = "total_${spec.id_prefix}"
-    }]]
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "${lookup(local.insights_function, key, "SUM")}([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+      }] if !local.all_accounts
+    ]
+  }
+
+  # All-accounts mode: one Metrics Insights query per spec. SCHEMA() must
+  # list the exact dimension set the collector publishes: every metric here
+  # is un-dimensioned except the network-exposure ones, which carry Region
+  # (summed across regions since no GROUP BY is given). The one exception to
+  # SUM is the Security Hub score, a percentage, which is averaged across
+  # accounts (matching its "Avg % Passed" title) rather than added up.
+  insights_region_keys = toset(["pub_ec2", "pub_rds", "pub_lb", "pub_s3"])
+  insights_function    = { sechub_score = "AVG" }
+
+  metric_group_insights = {
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "SELECT ${lookup(local.insights_function, key, "SUM")}(${spec.metric_name}) FROM SCHEMA(\"${spec.namespace}\"${contains(local.insights_region_keys, key) ? ", Region" : ""})"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+        period     = 86400
+      }] if local.all_accounts
+    ]
   }
 
   metric_groups = {
-    for key, spec in local.metric_specs : key => concat(local.metric_group_accounts[key], local.metric_group_totals[key])
+    for key, spec in local.metric_specs : key => concat(
+      local.metric_group_accounts[key],
+      local.metric_group_totals[key],
+      local.metric_group_insights[key],
+    )
   }
 
   # OpenSecurityGroupRules is dimensioned by Region within each account, so
-  # this one stays as one SEARCH expression per account instead of
-  # collapsing to a single org-wide sum — same approach
+  # in explicit mode it stays as one SEARCH expression per account instead
+  # of collapsing to a single org-wide sum — same approach
   # nhi-governance-dashboard's org-dashboard uses for SecretsWithoutRotation.
-  open_sg_by_account_region_metrics = [
-    for i, acct in var.member_account_ids : [{
-      expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)"
-      id         = "osg${i}"
-      accountId  = acct
-      label      = "${acct} - $${PROP('Dim.Region')}"
-    }]
-  ]
+  # In all-accounts mode a single query groups by account and Region.
+  open_sg_by_account_region_metrics = concat(
+    [
+      for i, acct in var.member_account_ids : [{
+        expression = "SEARCH('{${var.network_exposure_namespace},Region} MetricName=\"OpenSecurityGroupRules\"', 'Maximum', 86400)"
+        id         = "osg${i}"
+        accountId  = acct
+        label      = "${acct} - $${PROP('Dim.Region')}"
+      }]
+    ],
+    [
+      for _ in [1] : [{
+        expression = "SELECT SUM(OpenSecurityGroupRules) FROM SCHEMA(\"${var.network_exposure_namespace}\", Region) GROUP BY AWS.AccountId, Region"
+        id         = "osg_all"
+        period     = 86400
+      }] if local.all_accounts
+    ],
+  )
 }
 
 resource "aws_cloudwatch_dashboard" "fedramp_20x_audit_org" {

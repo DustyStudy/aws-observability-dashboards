@@ -24,12 +24,24 @@ Parameters:
 
   MemberAccountIds:
     Type: CommaDelimitedList
+    Default: ""
     Description: >-
-      Every member account ID whose network-exposure collector metrics (and,
-      optionally, VPC Flow Logs) should appear on this dashboard (the same
-      accounts you deployed collector.yaml and the OAM Link to). Does not
-      need to include the monitoring account itself unless it also runs its
-      own collector.
+      Leave empty (the default) to show every account linked to this
+      monitoring account, using CloudWatch Metrics Insights queries. Or list
+      specific 12-digit account IDs to show only those, one metric per
+      account (limited to roughly 500/(series+1) accounts per widget). The
+      VPC Flow Log panels are always per-account: they use LogAccountIds if
+      set, otherwise this list.
+
+  LogAccountIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      12-digit account IDs to show the VPC Flow Log panels for, one set of
+      panels per account (Logs Insights widgets take a single account ID, so
+      they cannot cover "all accounts"). If empty, the panels use
+      MemberAccountIds; in all-accounts mode (MemberAccountIds empty) no log
+      panels are shown. Only used when FlowLogsLogGroupName is set.
 
   MetricNamespace:
     Type: String
@@ -41,9 +53,10 @@ Parameters:
     Default: ""
     Description: >-
       Name of the EXISTING CloudWatch Logs group your VPC Flow Logs deliver
-      to; the same name is queried in every member account (one log widget
-      per account per panel, since log widgets take a single accountId).
-      Leave blank to omit the three flow-log panels entirely.
+      to; the same name is queried in every account the log panels cover
+      (one log widget per account per panel, since log widgets take a single
+      accountId; see LogAccountIds). Leave blank to omit the three flow-log
+      panels entirely.
 
   LogRetentionDays:
     Type: Number
@@ -184,6 +197,7 @@ Resources:
       Code:
         ZipFile: |
           import json
+          import re
           import urllib.request
 
           import boto3
@@ -219,13 +233,19 @@ Resources:
           # ---------------------------------------------------------------
           # Widget builders. Every network-exposure metric is dimensioned by
           # Region, so there are three widget shapes:
-          #   * 24h tiles  - one hidden per-account SEARCH (each carrying its own
-          #                  "accountId") plus one visible SUM() expression, giving
-          #                  a single org-wide number per tile.
-          #   * bar charts - one VISIBLE SEARCH per account, so per-account x
-          #                  per-region stays readable instead of collapsing.
+          #   * 24h tiles  - explicit mode: one hidden per-account SEARCH (each
+          #                  carrying its own "accountId") plus one visible SUM()
+          #                  expression. All-accounts mode: one Metrics Insights
+          #                  query, SELECT SUM(metric) FROM SCHEMA(ns, Region),
+          #                  summing every region of every linked account.
+          #   * bar charts - explicit mode: one VISIBLE SEARCH per account, so
+          #                  per-account x per-region stays readable. All-accounts
+          #                  mode: SELECT SUM(metric) ... GROUP BY Region, one bar
+          #                  per region summed across the org (a per-account
+          #                  breakdown would be cut off at 500 series per query).
           #   * log panels - Logs Insights widgets take a single "accountId", so
-          #                  each panel is repeated once per member account.
+          #                  each panel is repeated once per log account
+          #                  (LogAccountIds if set, else MemberAccountIds).
           # Each widget uses its own distinct id prefix; metric-math ids must be
           # unique within one widget's metrics array. See
           # ../../org-observability/README.md for the general recipe.
@@ -235,20 +255,30 @@ Resources:
 
 
           def _tile_widget(x, y, w, h, title, label, namespace, metric_name, account_ids, region, id_prefix):
-              entries = []
-              ids = []
-              for i, acct in enumerate(account_ids):
-                  mid = f"{id_prefix}{i}"
-                  ids.append(mid)
+              if not account_ids:
+                  # All-accounts mode: one Metrics Insights query over every
+                  # account linked to this monitoring account.
+                  entries = [[{
+                      "expression": f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}", Region)',
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": 86400,
+                  }]]
+              else:
+                  entries = []
+                  ids = []
+                  for i, acct in enumerate(account_ids):
+                      mid = f"{id_prefix}{i}"
+                      ids.append(mid)
+                      entries.append([{
+                          "expression": _search(namespace, metric_name, "Sum"),
+                          "id": mid, "accountId": acct, "visible": False,
+                      }])
                   entries.append([{
-                      "expression": _search(namespace, metric_name, "Sum"),
-                      "id": mid, "accountId": acct, "visible": False,
+                      "expression": f"SUM([{','.join(ids)}])",
+                      "label": label,
+                      "id": f"total_{id_prefix}",
                   }])
-              entries.append([{
-                  "expression": f"SUM([{','.join(ids)}])",
-                  "label": label,
-                  "id": f"total_{id_prefix}",
-              }])
               return {
                   "type": "metric", "x": x, "y": y, "width": w, "height": h,
                   "properties": {"title": title, "region": region, "view": "singleValue", "metrics": entries},
@@ -257,6 +287,15 @@ Resources:
 
           def _bar_widget(x, y, w, h, title, namespace, metric_name, account_ids, region, id_prefix):
               metrics = []
+              if not account_ids:
+                  # All-accounts mode: one bar per Region, summed across accounts
+                  # (so the title has no per-account breakdown to mention).
+                  title = title.replace("Account/", "")
+                  metrics.append([{
+                      "expression": f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}", Region) GROUP BY Region',
+                      "id": f"{id_prefix}_all",
+                      "period": 86400,
+                  }])
               for i, acct in enumerate(account_ids):
                   metrics.append([{
                       "expression": _search(namespace, metric_name, "Maximum"),
@@ -274,6 +313,19 @@ Resources:
               """One 12x6 widget per account per panel, two per row, panels stacked."""
               if not log_group:
                   return []
+              if not account_ids:
+                  # All-accounts mode with no LogAccountIds: log widgets take a
+                  # single accountId, so say how to enable them instead.
+                  return [{
+                      "type": "text", "x": 0, "y": start_y, "width": 24, "height": 2,
+                      "properties": {
+                          "markdown": (
+                              "**VPC Flow Log panels are not shown.** Logs Insights widgets take a single "
+                              "account ID, so they cannot cover all accounts. Set `log_account_ids` / "
+                              "`LogAccountIds` to the account IDs you want panels for."
+                          ),
+                      },
+                  }]
               panels = [
                   ("VPC Flow Logs – Rejected Connections Trend (hourly)", "timeSeries",
                    f"SOURCE '{log_group}' | filter action = 'REJECT' | stats count(*) as rejected by bin(1h)"),
@@ -303,10 +355,8 @@ Resources:
               return widgets
 
 
-          def build_dashboard_body(namespace, account_ids, region, flow_logs_log_group=""):
-              if not account_ids:
-                  raise ValueError("MemberAccountIds must contain at least one account ID.")
-
+          def build_dashboard_body(namespace, account_ids, region, flow_logs_log_group="", log_account_ids=()):
+              # Empty account_ids = all-accounts mode (Metrics Insights queries).
               widgets = [
                   _tile_widget(0, 0, 6, 4, "Open SG Rules – Sensitive Ports (24h, org-wide)", "Open Rules (org-wide)",
                                namespace, "OpenSensitivePortRules", account_ids, region, "tosp"),
@@ -328,13 +378,16 @@ Resources:
                               namespace, "PubliclyAccessibleS3Buckets", account_ids, region, "bs3"),
               ]
               # Metric widgets occupy rows 0-21 of the 24-column grid; log panels start below.
-              widgets.extend(_log_widgets(flow_logs_log_group, account_ids, region, 22))
+              # Log panels are per-account: LogAccountIds if given, else MemberAccountIds.
+              log_accounts = list(log_account_ids) or list(account_ids)
+              widgets.extend(_log_widgets(flow_logs_log_group, log_accounts, region, 22))
 
               if len(widgets) > MAX_WIDGETS_PER_DASHBOARD:
                   raise ValueError(
                       f"{len(widgets)} widgets exceeds CloudWatch's {MAX_WIDGETS_PER_DASHBOARD}-widget dashboard limit "
-                      f"({len(account_ids)} accounts; each flow-log panel adds one widget per account). "
-                      "Split MemberAccountIds across several org-dashboard stacks with different DashboardName values."
+                      f"({len(log_accounts)} log accounts; each flow-log panel adds one widget per account). "
+                      "Shorten LogAccountIds (or MemberAccountIds when LogAccountIds is empty), or use several "
+                      "org-dashboard stacks with different DashboardName values."
                   )
               for widget in widgets:
                   count = len(widget["properties"].get("metrics", []))
@@ -342,9 +395,17 @@ Resources:
                       raise ValueError(
                           f"Widget '{widget['properties']['title']}' would need {count} metrics, over CloudWatch's "
                           f"{MAX_METRICS_PER_WIDGET}-per-widget limit ({len(account_ids)} accounts). "
-                          "Split MemberAccountIds across several org-dashboard stacks with different DashboardName values."
+                          "Leave MemberAccountIds empty for all-accounts mode, or split it across several "
+                          "org-dashboard stacks with different DashboardName values."
                       )
               return {"widgets": widgets}
+
+
+          def _parse_ids(value):
+              """Custom-resource properties arrive as a comma-joined string (or a list)."""
+              if isinstance(value, str):
+                  value = value.split(",")
+              return [a.strip() for a in value if a and a.strip()]
 
 
           def handler(event, context):
@@ -355,13 +416,17 @@ Resources:
               try:
                   if request_type in ("Create", "Update"):
                       namespace = props.get("MetricNamespace", "NetworkExposure")
-                      account_ids = props["MemberAccountIds"]
-                      if isinstance(account_ids, str):
-                          account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      account_ids = _parse_ids(props.get("MemberAccountIds", []))
+                      log_account_ids = _parse_ids(props.get("LogAccountIds", []))
                       flow_logs_log_group = props.get("FlowLogsLogGroupName", "").strip()
+                      if not re.fullmatch(r"[A-Za-z0-9_./-]+", namespace):
+                          raise ValueError("MetricNamespace may only contain letters, numbers, underscores, dots, slashes, and hyphens")
+                      for a in account_ids + log_account_ids:
+                          if not re.fullmatch(r"[0-9]{12}", a):
+                              raise ValueError(f"Invalid account ID: {a!r}")
                       region = props.get("Region") or context.invoked_function_arn.split(":")[3]
 
-                      body = build_dashboard_body(namespace, account_ids, region, flow_logs_log_group)
+                      body = build_dashboard_body(namespace, account_ids, region, flow_logs_log_group, log_account_ids)
                       cloudwatch.put_dashboard(DashboardName=dashboard_name, DashboardBody=json.dumps(body))
                       send_cfn_response(event, context, "SUCCESS", physical_resource_id=dashboard_name)
 
@@ -391,6 +456,7 @@ Resources:
       ServiceToken: !GetAtt DashboardGeneratorFunction.Arn
       DashboardName: !Ref DashboardName
       MemberAccountIds: !Join [",", !Ref MemberAccountIds]
+      LogAccountIds: !Join [",", !Ref LogAccountIds]
       MetricNamespace: !Ref MetricNamespace
       FlowLogsLogGroupName: !Ref FlowLogsLogGroupName
       Region: !Ref "AWS::Region"

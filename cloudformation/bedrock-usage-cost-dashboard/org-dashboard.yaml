@@ -14,6 +14,10 @@ Description: >
   summing averages across accounts would be meaningless. The Terraform
   version does this natively with `for` expressions.
 
+  With MemberAccountIds left empty (the default) every widget is a
+  CloudWatch Metrics Insights query spanning all accounts linked to this
+  monitoring account; with a list it uses one metric per listed account.
+
 Parameters:
   DashboardName:
     Type: String
@@ -22,11 +26,13 @@ Parameters:
 
   MemberAccountIds:
     Type: CommaDelimitedList
+    Default: ""
     Description: >-
-      Every member account ID whose Bedrock usage and cost-collector metrics
-      should appear on this dashboard (the same accounts you deployed
-      collector.yaml and the OAM Link to). Does not need to include the
-      monitoring account itself unless it also runs its own collector.
+      Leave empty (the default) to show every account linked to this
+      monitoring account, using CloudWatch Metrics Insights queries that
+      group by account. Or list specific 12-digit account IDs to show only
+      those, one metric per account (limited to roughly 500/(series+1)
+      accounts per widget).
 
   MetricNamespace:
     Type: String
@@ -172,6 +178,7 @@ Resources:
       Code:
         ZipFile: |
           import json
+          import re
           import urllib.request
 
           import boto3
@@ -212,7 +219,16 @@ Resources:
           # combining expression. combine="SUM" for count-style metrics
           # (invocations, tokens, errors, throttles); combine="AVG" for
           # latency — summing averages across accounts would be meaningless.
+          # With no account_ids (all-accounts mode) it is instead one Metrics
+          # Insights query over every linked account, using the same SUM/AVG.
           def combine_search(metric_name, account_ids, label, stat="Sum", period=300, combine="SUM", id_prefix="m"):
+              if not account_ids:
+                  return [[{
+                      "expression": f'SELECT {combine}({metric_name}) FROM SCHEMA("{BEDROCK}", ModelId)',
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": period,
+                  }]]
               entries = []
               ids = []
               for i, acct in enumerate(account_ids):
@@ -235,6 +251,15 @@ Resources:
           # "accountId") plus one visible SUM() across all of them.
           def sum_across_accounts(namespace, metric_name, dimension_name, dimension_value, account_ids, label,
                                   stat="Maximum", period=86400, id_prefix="m"):
+              if not account_ids:
+                  # All-accounts mode: one Metrics Insights query over every
+                  # account linked to this monitoring account.
+                  return [[{
+                      "expression": f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}", {dimension_name}) WHERE {dimension_name} = \'{dimension_value}\'',
+                      "label": label,
+                      "id": f"total_{id_prefix}",
+                      "period": period,
+                  }]]
               entries = []
               ids = []
               for i, acct in enumerate(account_ids):
@@ -255,9 +280,21 @@ Resources:
           # A dimensioned metric with a variable set of series per account
           # (one per ModelId / UsageType) doesn't collapse to one number —
           # show one SEARCH per account side by side, labelled with the
-          # account ID and the dimension value.
+          # account ID and the dimension value. In all-accounts mode this is
+          # a single Metrics Insights query grouped by account and dimension;
+          # ORDER BY ... LIMIT 500 keeps the top 500 series by value (500 is
+          # the per-query maximum) instead of an arbitrary subset.
           def search_per_account(namespace, dimension, metric_name, account_ids,
                                  stat="Sum", period=300, id_prefix="p"):
+              if not account_ids:
+                  return [[{
+                      "expression": (
+                          f'SELECT SUM({metric_name}) FROM SCHEMA("{namespace}", {dimension}) '
+                          f"GROUP BY AWS.AccountId, {dimension} ORDER BY SUM() DESC LIMIT 500"
+                      ),
+                      "id": f"{id_prefix}_all",
+                      "period": period,
+                  }]]
               return [
                   [{
                       "expression": f"SEARCH('{{{namespace},{dimension}}} MetricName=\"{metric_name}\"', '{stat}', {period})",
@@ -269,8 +306,18 @@ Resources:
 
 
           # Cost attribution per account: each account's own TOTAL series
-          # side by side (the main org use case for this dashboard).
+          # side by side (the main org use case for this dashboard). In
+          # all-accounts mode: GROUP BY AWS.AccountId, top 500 accounts by cost.
           def cost_per_account(namespace, account_ids, id_prefix="cacct"):
+              if not account_ids:
+                  return [[{
+                      "expression": (
+                          f'SELECT SUM(EstimatedDailyCostUSD) FROM SCHEMA("{namespace}", UsageType) '
+                          "WHERE UsageType = 'TOTAL' GROUP BY AWS.AccountId ORDER BY SUM() DESC LIMIT 500"
+                      ),
+                      "id": f"{id_prefix}_all",
+                      "period": 86400,
+                  }]]
               return [
                   [namespace, "EstimatedDailyCostUSD", "UsageType", "TOTAL", {
                       "stat": "Maximum", "period": 86400, "accountId": acct,
@@ -336,9 +383,15 @@ Resources:
               try:
                   if request_type in ("Create", "Update"):
                       namespace = props.get("MetricNamespace", "BedrockCostObservability")
-                      account_ids = props["MemberAccountIds"]
+                      account_ids = props.get("MemberAccountIds", [])
                       if isinstance(account_ids, str):
                           account_ids = [a.strip() for a in account_ids.split(",") if a.strip()]
+                      account_ids = [a for a in account_ids if a]
+                      if not re.fullmatch(r"[A-Za-z0-9_./-]+", namespace):
+                          raise ValueError("MetricNamespace may only contain letters, numbers, underscores, dots, slashes, and hyphens")
+                      for a in account_ids:
+                          if not re.fullmatch(r"[0-9]{12}", a):
+                              raise ValueError(f"Invalid account ID: {a!r}")
                       region = props.get("Region") or context.invoked_function_arn.split(":")[3]
 
                       body = build_dashboard_body(namespace, account_ids, region)

@@ -23,9 +23,17 @@ data "aws_region" "current" {}
 #
 # The two Logs Insights panels (GuardDuty, Inspector) cannot be collapsed
 # this way: a log widget takes a single accountId, so one widget per
-# member account per panel is emitted instead.
+# account per panel is emitted instead (for log_account_ids, or for
+# member_account_ids when that is empty; none in all-accounts mode).
 # -----------------------------------------------------------------------
 locals {
+  # With no member_account_ids the metric tiles query every account linked
+  # to this monitoring account through CloudWatch Metrics Insights
+  # (SELECT ... FROM SCHEMA(...)), so they are not bound by the per-widget
+  # metric limit. With a list, they keep the explicit per-account approach
+  # below.
+  all_accounts = length(var.member_account_ids) == 0
+
   metric_specs = {
     version_drift    = { metric_name = "ClusterVersionDriftCount", stat = "Maximum", id_prefix = "vd", label = "Clusters with Version Drift (org-wide)" }
     nodegroup_update = { metric_name = "NodegroupsNeedingUpdate", stat = "Maximum", id_prefix = "nu", label = "Nodegroups Needing Version Update (org-wide)" }
@@ -49,21 +57,56 @@ locals {
   }
 
   metric_group_totals = {
-    for key, spec in local.metric_specs : key => [[{
-      expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
-      label      = spec.label
-      id         = "total_${spec.id_prefix}"
-    }]]
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "SUM([${join(",", [for i, _ in var.member_account_ids : "${spec.id_prefix}${i}"])}])"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+      }] if !local.all_accounts
+    ]
+  }
+
+  # All-accounts mode: one Metrics Insights query per widget. The collector
+  # publishes these counts without dimensions, hence SCHEMA("<namespace>")
+  # with no dimension list.
+  metric_group_insights = {
+    for key, spec in local.metric_specs : key => [
+      for _ in [1] : [{
+        expression = "SELECT SUM(${spec.metric_name}) FROM SCHEMA(\"${var.metric_namespace}\")"
+        label      = spec.label
+        id         = "total_${spec.id_prefix}"
+        period     = 86400
+      }] if local.all_accounts
+    ]
   }
 
   metric_groups = {
-    for key, spec in local.metric_specs : key => concat(local.metric_group_accounts[key], local.metric_group_totals[key])
+    for key, spec in local.metric_specs : key => concat(
+      local.metric_group_accounts[key],
+      local.metric_group_totals[key],
+      local.metric_group_insights[key],
+    )
   }
 
   # Log panels: same log groups and queries as the single-account
   # dashboard; the log group names come from the collector's dashboard_name.
   guardduty_log_group = "/aws/events/${var.collector_dashboard_name}/guardduty-eks"
   inspector_log_group = "/aws/events/${var.collector_dashboard_name}/inspector-images"
+
+  # Accounts that get log panels: log_account_ids if set, otherwise the
+  # explicit member_account_ids (so explicit mode is unchanged). In
+  # all-accounts mode with no log_account_ids this is empty.
+  log_accounts = length(var.log_account_ids) > 0 ? var.log_account_ids : var.member_account_ids
+
+  header_markdown = local.all_accounts ? "## EKS Security Dashboard (org-wide)\nGuardDuty EKS Protection findings, Inspector container image vulnerabilities, and Kubernetes version/AMI patch drift across all clusters and nodegroups in every account linked to this monitoring account. Counts are summed across accounts; finding logs are shown per account only for the accounts listed in log_account_ids." : "## EKS Security Dashboard (org-wide)\nGuardDuty EKS Protection findings, Inspector container image vulnerabilities, and Kubernetes version/AMI patch drift across all clusters and nodegroups in ${length(var.member_account_ids)} member account(s). Counts are summed across accounts; finding logs are shown per account."
+
+  log_note_markdown = (
+    length(var.log_account_ids) > 0
+    ? "### Findings by account\nA Logs Insights widget can only query one account, so each account in log_account_ids has its own GuardDuty (left) and Inspector (right) panel."
+    : local.all_accounts
+    ? "### Findings by account\nA Logs Insights widget can only query one account, so it cannot cover all accounts at once. No GuardDuty or Inspector panels are shown: set log_account_ids to the 12-digit IDs of the accounts to show, and each gets its own GuardDuty (left) and Inspector (right) panel."
+    : "### Findings by member account\nA Logs Insights widget can only query one account, so each member account has its own GuardDuty (left) and Inspector (right) panel."
+  )
 
   # Log section starts below the 2-row metric grid (y=2..13) and a 2-high
   # note (y=14..15); each account then takes one 8-high row: GuardDuty on
@@ -72,7 +115,7 @@ locals {
   log_row_h   = 8
 
   log_widgets = flatten([
-    for i, acct in var.member_account_ids : [
+    for i, acct in local.log_accounts : [
       {
         type   = "log"
         x      = 0
@@ -108,6 +151,15 @@ locals {
 resource "aws_cloudwatch_dashboard" "eks_security_org" {
   dashboard_name = var.dashboard_name
 
+  lifecycle {
+    # Variable validations cannot see other variables before Terraform 1.9,
+    # so the log-panel limit is checked here against whichever list is used.
+    precondition {
+      condition     = length(local.log_accounts) <= 246
+      error_message = "A dashboard holds at most 500 widgets and each log account adds 2 log widgets (plus 8 fixed widgets), so at most 246 accounts fit. member_account_ids is used for the log panels when log_account_ids is empty: set log_account_ids to at most 246 accounts, or split the accounts across several org-dashboards with different dashboard_name values."
+    }
+  }
+
   dashboard_body = jsonencode({
     widgets = concat(
       [
@@ -118,7 +170,7 @@ resource "aws_cloudwatch_dashboard" "eks_security_org" {
           width  = 24
           height = 2
           properties = {
-            markdown = "## EKS Security Dashboard (org-wide)\nGuardDuty EKS Protection findings, Inspector container image vulnerabilities, and Kubernetes version/AMI patch drift across all clusters and nodegroups in ${length(var.member_account_ids)} member account(s). Counts are summed across accounts; finding logs are shown per account."
+            markdown = local.header_markdown
           }
         },
         {
@@ -206,7 +258,7 @@ resource "aws_cloudwatch_dashboard" "eks_security_org" {
           width  = 24
           height = 2
           properties = {
-            markdown = "### Findings by member account\nA Logs Insights widget can only query one account, so each member account has its own GuardDuty (left) and Inspector (right) panel."
+            markdown = local.log_note_markdown
           }
         },
       ],

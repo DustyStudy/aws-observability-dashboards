@@ -10,13 +10,9 @@ variable "dashboard_name" {
 }
 
 variable "member_account_ids" {
-  description = "Every member account ID whose EKS security collector metrics and finding logs should appear on this dashboard (the same accounts you deployed the collector module and an OAM Link to). Does not need to include the monitoring account itself unless it also runs its own collector. Each account adds two log widgets, so at most 246 accounts fit on one dashboard (500-widget limit); split larger orgs across several org-dashboards."
+  description = "Leave empty (the default) to show the metric tiles for every account linked to this monitoring account, using CloudWatch Metrics Insights queries that group by account. Or list specific 12-digit account IDs to show only those, one metric per account (at most 499 accounts, since each widget also holds one SUM expression within the 500-metric limit). When log_account_ids is empty, this list also decides which accounts get GuardDuty and Inspector log panels (see log_account_ids for the limit)."
   type        = list(string)
-
-  validation {
-    condition     = length(var.member_account_ids) > 0
-    error_message = "member_account_ids must contain at least one account ID."
-  }
+  default     = []
 
   validation {
     condition     = alltrue([for a in var.member_account_ids : can(regex("^[0-9]{12}$", a))])
@@ -24,8 +20,24 @@ variable "member_account_ids" {
   }
 
   validation {
-    condition     = length(var.member_account_ids) <= 246
-    error_message = "A dashboard holds at most 500 widgets and each account adds 2 log widgets (plus 8 fixed widgets), so at most 246 accounts fit; split the accounts across several org-dashboards with different dashboard_name values."
+    condition     = length(var.member_account_ids) <= 499
+    error_message = "A metric widget holds at most 500 metrics and each account adds one (plus one combining expression), so at most 499 accounts fit in member_account_ids; leave it empty for all-accounts mode or split the accounts across several org-dashboards with different dashboard_name values."
+  }
+}
+
+variable "log_account_ids" {
+  description = "12-digit IDs of the accounts that get GuardDuty and Inspector log panels. A Logs Insights widget can only query one account, so log panels cannot be generated for \"all accounts\": list the accounts you want here. If empty (the default), log panels are created for member_account_ids; in all-accounts mode (member_account_ids also empty) no log panels are created. Each account adds two log widgets, so at most 246 accounts fit on one dashboard (500-widget limit); split larger orgs across several org-dashboards."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for a in var.log_account_ids : can(regex("^[0-9]{12}$", a))])
+    error_message = "Every entry in log_account_ids must be a 12-digit AWS account ID."
+  }
+
+  validation {
+    condition     = length(var.log_account_ids) <= 246
+    error_message = "A dashboard holds at most 500 widgets and each account adds 2 log widgets (plus 8 fixed widgets), so at most 246 accounts fit in log_account_ids; split the accounts across several org-dashboards with different dashboard_name values."
   }
 }
 
@@ -33,6 +45,11 @@ variable "metric_namespace" {
   description = "Namespace the collector publishes to. The collector hard-codes EKS/Security (in the Lambda source and in its IAM cloudwatch:namespace condition) and exposes no variable for it, so leave the default unless you have forked the collector."
   type        = string
   default     = "EKS/Security"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_./-]+$", var.metric_namespace))
+    error_message = "metric_namespace may only contain letters, numbers, underscores, dots, slashes, and hyphens."
+  }
 }
 
 variable "collector_dashboard_name" {
