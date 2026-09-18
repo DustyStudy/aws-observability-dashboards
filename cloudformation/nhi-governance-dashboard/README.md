@@ -120,3 +120,35 @@ Cognito identity pool role mappings, EKS IRSA role bindings (via the OIDC
 provider already surfaced here), or GitHub Actions OIDC trust relationships
 specifically (a subset of the external-trust-roles check, if you want it
 broken out on its own).
+
+## Org-wide deployment
+
+Deploy `collector.yaml` to every member account as a StackSet (see
+[`org-observability/README.md`](../../org-observability/README.md)), then
+deploy `org-dashboard.yaml` once in the central monitoring account.
+
+`org-dashboard.yaml` has two modes, chosen by the `MemberAccountIds` parameter:
+
+- **All accounts (default, `MemberAccountIds` left empty)**: each widget is a
+  CloudWatch Metrics Insights query over every account linked to the
+  monitoring account, for example
+  `SELECT SUM(StaleAccessKeys) FROM SCHEMA("NHIGovernance")`, and the
+  Secrets Manager panel adds `GROUP BY AWS.AccountId, Region`. There is no
+  account list to maintain and no per-widget account ceiling.
+- **Explicit list (`MemberAccountIds=111111111111,222222222222`)**: one
+  metric per account per series, limited to roughly 500/(series+1) accounts
+  per widget.
+
+All-accounts mode is new and has **not been verified against a live AWS
+Organization**. Things to know before relying on it:
+
+- Metrics Insights returns at most 500 time series per query; totals are
+  unaffected, but the per-account Secrets Manager breakdown is truncated
+  beyond that.
+- Each total is a `SUM` over the period (86400 s). The collector publishes
+  once per schedule (`rate(1 day)` by default), so this is correct as long
+  as the schedule is not shorter than one day; a shorter schedule would
+  count an account more than once per period.
+- The queries also include any metrics the monitoring account itself
+  publishes in this namespace.
+- Use the explicit list to restrict the dashboard to specific accounts.

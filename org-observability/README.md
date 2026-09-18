@@ -224,6 +224,11 @@ The remaining five follow those patterns:
   A widget with S series therefore supports roughly 500/(S+1) accounts, and
   dashboards with per-account log panels are capped lower still (each
   dashboard's README and its variable validation give the exact figure).
+- `nhi-governance-dashboard` also offers an experimental all-accounts mode
+  (leave its account list empty) that uses CloudWatch Metrics Insights
+  queries with `GROUP BY AWS.AccountId` instead of listing accounts, which
+  avoids the per-widget account ceiling. It has not been verified against a
+  live organization yet; see that dashboard's README for its caveats.
 - StackSets and OAM themselves scale to 100,000 source accounts per sink,
   but a single dashboard's widget math does not. For large organizations,
   deploy the same org-dashboard several times with different
