@@ -14,7 +14,11 @@ Every dashboard here is built on native **CloudWatch Dashboards + Logs Insights*
 not QuickSight. That's a deliberate choice for a public template repo:
 
 - No extra licensing/per-user cost — CloudWatch is available in every account
-- Works identically in AWS commercial and AWS GovCloud
+- Built to work in both AWS commercial and AWS GovCloud (partition-aware
+  ARNs throughout). The org-dashboards' default all-accounts mode uses
+  CloudWatch Metrics Insights, whose GovCloud availability has not been
+  confirmed; if it isn't available in your partition, pass an explicit
+  account list instead
 - Deployable and lintable in CI the same way as the other repos (cfn-lint/Checkov,
   tflint/Checkov)
 - QuickSight dashboards require a `Definition`/analysis payload that's hundreds of
@@ -100,18 +104,17 @@ which dashboards have this today.
 GitHub Actions runs on every push/PR:
 - **CloudFormation:** cfn-lint, Checkov
 - **Terraform:** `terraform fmt -check`, `terraform validate`, tflint, Checkov
-- **Lambda collectors:** pytest unit tests, plus a script that fails the
-  build if a dashboard's CloudFormation and Terraform Lambda copies have
-  drifted apart (see [Tests](#tests) below)
+- **Lambda collectors and org-dashboard generators:** pytest unit tests,
+  plus a script that fails the build if a dashboard's CloudFormation and
+  Terraform Lambda copies have drifted apart (see [Tests](#tests) below)
 
-The workflow follows most of GitHub's CI/CD hardening guidance: the
-`checkout`, `setup-python`, and `setup-terraform` actions are pinned to a
-full-length commit SHA rather than a mutable tag or branch (with the
-human-readable version kept as a trailing comment so Dependabot can still
-propose updates); `setup-tflint` and `checkov-action` are still on version
-tags and are next in line to be pinned the same way. The default
+The workflow follows GitHub's CI/CD hardening guidance: every action
+(`checkout`, `setup-python`, `setup-terraform`, `setup-tflint`, and
+`checkov-action`) is pinned to a full-length commit SHA rather than a
+mutable tag or branch, with the human-readable version kept as a trailing
+comment so Dependabot can still propose updates. The default
 `GITHUB_TOKEN` permission is restricted to `contents: read`, checkout steps
-don't persist credentials for later steps to pick up, and both jobs have an
+don't persist credentials for later steps to pick up, and every job has an
 explicit timeout. CI covers every CloudFormation and Terraform file in the
 repo, including `org-observability/` and each dashboard's nested
 `collector/`/`org-dashboard/` subfolders, not just the top-level
@@ -144,7 +147,14 @@ silently again:
 - **`tests/`** — pytest unit tests for the non-trivial logic in each
   collector (stale-access-key/AMI date math, external-trust-policy
   detection, security-group/S3-exposure classification, EKS version-drift
-  and public-endpoint detection). Run them locally with:
+  and public-endpoint detection). It also includes
+  `tests/test_org_dashboard_generators.py`, which loads each org-dashboard's
+  inline generator Lambda, drives its `handler()` in both account modes,
+  and checks the dashboard it would submit: valid JSON, unique metric ids
+  per widget, no overlapping widgets on the 24-column grid, CloudWatch's
+  widget and metric limits, and rejection of bad account IDs and
+  namespaces. It checks structure only; it can't show that a query renders
+  in a real monitoring account. Run them locally with:
   ```
   pip install -r tests/requirements.txt
   pytest tests/ -v

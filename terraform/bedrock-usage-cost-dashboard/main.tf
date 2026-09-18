@@ -15,6 +15,7 @@ terraform {
 
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
 
 # ---------------------------------------------------------------------------
 # KMS key used to encrypt the cost-collector's log group, env vars, and DLQ
@@ -29,7 +30,7 @@ resource "aws_kms_key" "observability" {
       {
         Sid       = "AllowAccountKeyAdministration"
         Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Principal = { AWS = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root" }
         Action    = "kms:*"
         Resource  = "*"
       },
@@ -47,7 +48,7 @@ resource "aws_kms_key" "observability" {
         Resource = "*"
         Condition = {
           ArnLike = {
-            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:*"
+            "kms:EncryptionContext:aws:logs:arn" = "arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:*"
           }
         }
       },
@@ -113,12 +114,12 @@ resource "aws_iam_role" "cost_collector" {
 
 resource "aws_iam_role_policy_attachment" "cost_collector_basic_execution" {
   role       = aws_iam_role.cost_collector.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
 resource "aws_iam_role_policy_attachment" "cost_collector_xray" {
   role       = aws_iam_role.cost_collector.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
 }
 
 data "aws_iam_policy_document" "cost_collector_permissions" {

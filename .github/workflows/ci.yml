@@ -44,7 +44,7 @@ jobs:
           find cloudformation org-observability -name '*.yaml' -o -name '*.yml' | xargs cfn-lint
 
       - name: Run Checkov (CloudFormation)
-        uses: bridgecrewio/checkov-action@v12.3123.0
+        uses: bridgecrewio/checkov-action@a8664e3a0549367977f0cda990a34311835c87c0 # v12.3123.0
         with:
           # Repo root so this also picks up org-observability/, and any
           # future dashboard folder, without needing a CI change every time.
@@ -88,13 +88,8 @@ jobs:
             (cd "$dir" && terraform init -backend=false && terraform validate)
           done < /tmp/tf_dirs.txt
 
-      # NOTE: terraform-linters/setup-tflint is intentionally left on the
-      # major-version tag (not a commit SHA) for now — verify the exact
-      # commit for the tag you want
-      # (e.g. `gh api repos/terraform-linters/setup-tflint/git/refs/tags/v5`)
-      # and pin it, matching checkout/setup-terraform/setup-python above.
       - name: Set up TFLint
-        uses: terraform-linters/setup-tflint@v6
+        uses: terraform-linters/setup-tflint@1cf010d3c7aef302051ccdb68c14c5dc2efa34ef # v6.3.1
 
       - name: Run TFLint (all modules)
         run: |
@@ -105,10 +100,8 @@ jobs:
             (cd "$dir" && tflint)
           done < /tmp/tf_dirs.txt
 
-      # NOTE: bridgecrewio/checkov-action is also left on a version tag, not
-      # a SHA — same caveat as setup-tflint above.
       - name: Run Checkov (Terraform)
-        uses: bridgecrewio/checkov-action@v12.3123.0
+        uses: bridgecrewio/checkov-action@a8664e3a0549367977f0cda990a34311835c87c0 # v12.3123.0
         with:
           # Repo root so org-observability/'s .tf files (and any future
           # dashboard) are covered without a CI change.
