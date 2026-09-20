@@ -44,6 +44,17 @@ PAIRS = {
 }
 
 
+# The StackSet-oriented collector.yaml files embed the same Lambda code a
+# third time. They were not compared before, so a fix applied to template.yaml
+# and the Terraform copy could silently miss the copy that actually gets
+# rolled out across an organization (eks-security-dashboard's had already
+# fallen behind).
+for _cfn, _tf in list(PAIRS.items()):
+    _collector = _cfn.replace("template.yaml", "collector.yaml")
+    if (REPO_ROOT / _collector).exists():
+        PAIRS[_collector] = _tf
+
+
 class _IgnoreUnknownTagsLoader(yaml.SafeLoader):
     """Loads CloudFormation YAML by treating !Ref/!Sub/etc as plain values."""
 

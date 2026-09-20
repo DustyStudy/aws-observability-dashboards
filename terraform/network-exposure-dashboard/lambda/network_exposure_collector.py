@@ -114,7 +114,9 @@ def scan_s3_buckets(findings):
             try:
                 acl = s3.get_bucket_acl(Bucket=name)
                 for grant in acl.get("Grants", []):
-                    if grant.get("Grantee", {}).get("URI", "").endswith("/AllUsers"):
+                    # AuthenticatedUsers means "any AWS account in the world", not
+                    # just this one, so it is just as public as AllUsers.
+                    if grant.get("Grantee", {}).get("URI", "").endswith(("/AllUsers", "/AuthenticatedUsers")):
                         is_public = True
                         break
             except ClientError:

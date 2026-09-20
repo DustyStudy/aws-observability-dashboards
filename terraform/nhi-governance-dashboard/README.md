@@ -27,7 +27,7 @@ breakdown.
   role, EventBridge schedule rule, CloudWatch Logs group, CloudWatch dashboard
 - The Lambda's role needs IAM credential-report and read permissions
   (`iam:GenerateCredentialReport`, `iam:GetCredentialReport`,
-  `iam:ListRoles`, `iam:ListOpenIDConnectProviders`,
+  `iam:ListRoles`, `iam:GetRole` (role last-used), `iam:ListOpenIDConnectProviders`,
   `iam:ListSAMLProviders`) — all read-only, none of them modify or delete
   anything
 

@@ -137,6 +137,13 @@ data "aws_iam_policy_document" "nhi_collector_permissions" {
   }
 
   statement {
+    sid       = "ReadRoleLastUsed"
+    effect    = "Allow"
+    actions   = ["iam:GetRole"]
+    resources = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/*"] # ListRoles omits RoleLastUsed; GetRole returns it
+  }
+
+  statement {
     sid       = "ListEnabledRegions"
     effect    = "Allow"
     actions   = ["ec2:DescribeRegions"]

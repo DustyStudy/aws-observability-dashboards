@@ -40,9 +40,13 @@ Resources:
               # "this sink", not "any resource" — access is scoped by the
               # aws:PrincipalOrgID condition below, not by this field
             Condition:
+              # aws:PrincipalOrgID is single-valued, so it must use a plain
+              # StringEquals. Under ForAllValues an ABSENT key evaluates to
+              # true, which would let any account that is not in an
+              # organization at all link to this sink.
+              StringEquals:
+                "aws:PrincipalOrgID": !Ref OrganizationId
               "ForAllValues:StringEquals":
-                "aws:PrincipalOrgID":
-                  - !Ref OrganizationId
                 "oam:ResourceTypes":
                   - "AWS::CloudWatch::Metric"
                   - "AWS::Logs::LogGroup"

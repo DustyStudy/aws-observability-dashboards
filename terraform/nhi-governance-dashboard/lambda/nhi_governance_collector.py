@@ -2,11 +2,13 @@ import csv
 import io
 import json
 import os
+import re
 import time
 import urllib.parse
 from datetime import datetime, timezone
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "NHIGovernance")
@@ -89,23 +91,51 @@ def _scan_credential_report(rows, findings):
     }
 
 
+def _principal_account(principal):
+    """Account ID an AWS principal string points at, or None if it is neither
+    a bare account ID nor an ARN (e.g. an unresolved unique ID)."""
+    if re.fullmatch(r"[0-9]{12}", principal):
+        return principal
+    if principal.startswith("arn:"):
+        parts = principal.split(":")
+        if len(parts) > 4 and re.fullmatch(r"[0-9]{12}", parts[4]):
+            return parts[4]
+    return None
+
+
 def _has_external_trust(trust_doc_raw, account_id):
     try:
         trust_doc = json.loads(urllib.parse.unquote(trust_doc_raw)) if isinstance(trust_doc_raw, str) else trust_doc_raw
     except (ValueError, TypeError):
         return False
+    if not isinstance(trust_doc, dict):
+        return False
 
-    for stmt in trust_doc.get("Statement", []):
+    statements = trust_doc.get("Statement", [])
+    if isinstance(statements, dict):
+        # IAM accepts a single statement object in place of a list. Iterating
+        # the dict would yield its keys (strings) and crash the whole scan.
+        statements = [statements]
+
+    for stmt in statements:
+        if not isinstance(stmt, dict) or stmt.get("Effect", "Allow") != "Allow":
+            continue  # a Deny statement never grants trust
         principal = stmt.get("Principal", {})
+        if principal == "*":
+            # "Principal": "*" is the string form of {"AWS": "*"}: anyone can assume the role.
+            return True
         aws_principals = principal.get("AWS") if isinstance(principal, dict) else None
         if aws_principals is None:
             continue
         if isinstance(aws_principals, str):
             aws_principals = [aws_principals]
         for p in aws_principals:
+            if not isinstance(p, str):
+                continue
             if p == "*":
                 return True
-            if p.startswith("arn:") and f":{account_id}:" not in p and account_id not in p:
+            principal_account = _principal_account(p)
+            if principal_account is not None and principal_account != account_id:
                 return True
     return False
 
@@ -121,15 +151,27 @@ def _scan_roles(iam, account_id, findings):
                 continue  # AWS-managed service-linked roles aren't useful NHI targets
             total_roles += 1
 
-            last_used = role.get("RoleLastUsed", {}).get("LastUsedDate")
-            if last_used is None:
-                stale_roles += 1
-                findings.append(f"STALE_ROLE role={role['RoleName']} reason=never_used")
-            else:
-                age = (datetime.now(timezone.utc) - last_used).days
-                if age > STALE_DAYS:
+            # list_roles omits RoleLastUsed (along with Tags and
+            # PermissionsBoundary), so every role would look "never used".
+            # get_role returns the full record.
+            try:
+                detail = iam.get_role(RoleName=role["RoleName"])["Role"]
+                last_used = detail.get("RoleLastUsed", {}).get("LastUsedDate")
+                usage_known = True
+            except ClientError as exc:
+                print(f"get_role failed for {role['RoleName']}: {exc}")
+                last_used = None
+                usage_known = False  # don't guess "stale" when the lookup failed
+
+            if usage_known:
+                if last_used is None:
                     stale_roles += 1
-                    findings.append(f"STALE_ROLE role={role['RoleName']} age_days={age}")
+                    findings.append(f"STALE_ROLE role={role['RoleName']} reason=never_used")
+                else:
+                    age = (datetime.now(timezone.utc) - last_used).days
+                    if age > STALE_DAYS:
+                        stale_roles += 1
+                        findings.append(f"STALE_ROLE role={role['RoleName']} age_days={age}")
 
             if _has_external_trust(role.get("AssumeRolePolicyDocument"), account_id):
                 external_trust_roles += 1
@@ -174,7 +216,8 @@ def handler(event, context):
     sts = boto3.client("sts")
     account_id = sts.get_caller_identity()["Account"]
 
-    iam = boto3.client("iam")
+    # get_role is called once per role; adaptive retries ride out IAM throttling.
+    iam = boto3.client("iam", config=Config(retries={"max_attempts": 10, "mode": "adaptive"}))
     findings = []
 
     rows = _get_credential_report(iam)

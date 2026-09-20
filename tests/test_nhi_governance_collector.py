@@ -209,3 +209,108 @@ def test_chunked_splits_into_expected_batch_sizes():
 
 def test_chunked_empty_input_yields_no_batches():
     assert list(collector.chunked([], 20)) == []
+
+
+# ---------------------------------------------------------------------
+# _has_external_trust: forms that used to be missed or to crash the scan
+# ---------------------------------------------------------------------
+
+def test_external_trust_string_wildcard_principal_is_flagged():
+    # "Principal": "*" is the string form of {"AWS": "*"}: publicly assumable.
+    trust_doc = {"Statement": [{"Effect": "Allow", "Principal": "*"}]}
+    assert collector._has_external_trust(trust_doc, "111111111111") is True
+
+
+def test_external_trust_single_statement_object_does_not_crash():
+    # IAM accepts "Statement": {...} instead of a list. Iterating the dict used
+    # to raise AttributeError and take the whole NHI scan down with it.
+    trust_doc = {"Statement": {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::222222222222:root"}}}
+    assert collector._has_external_trust(trust_doc, "111111111111") is True
+
+
+def test_external_trust_bare_account_id_other_account_is_flagged():
+    trust_doc = {"Statement": [{"Effect": "Allow", "Principal": {"AWS": "222222222222"}}]}
+    assert collector._has_external_trust(trust_doc, "111111111111") is True
+
+
+def test_external_trust_bare_account_id_same_account_is_not_flagged():
+    trust_doc = {"Statement": [{"Effect": "Allow", "Principal": {"AWS": "111111111111"}}]}
+    assert collector._has_external_trust(trust_doc, "111111111111") is False
+
+
+def test_external_trust_own_account_id_inside_foreign_role_name_is_still_flagged():
+    # The old substring check treated this as internal because the role name
+    # happens to contain our account ID.
+    trust_doc = {
+        "Statement": [
+            {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::999999999999:role/x-111111111111"}}
+        ]
+    }
+    assert collector._has_external_trust(trust_doc, "111111111111") is True
+
+
+def test_external_trust_deny_statement_is_not_a_grant():
+    trust_doc = {"Statement": [{"Effect": "Deny", "Principal": {"AWS": "*"}}]}
+    assert collector._has_external_trust(trust_doc, "111111111111") is False
+
+
+def test_external_trust_non_object_document_does_not_raise():
+    assert collector._has_external_trust("[1, 2, 3]", "111111111111") is False
+
+
+# ---------------------------------------------------------------------
+# _scan_roles: last-used comes from get_role, not list_roles
+# ---------------------------------------------------------------------
+
+def _iam_with_roles(roles, get_role_side_effect):
+    from unittest.mock import MagicMock
+
+    iam = MagicMock()
+    iam.get_paginator.return_value.paginate.return_value = [{"Roles": roles}]
+    iam.get_role.side_effect = get_role_side_effect
+    return iam
+
+
+def _role(name):
+    return {"RoleName": name, "Path": "/", "AssumeRolePolicyDocument": {"Statement": []}}
+
+
+def test_scan_roles_uses_get_role_last_used_so_recent_roles_are_not_stale():
+    recent = datetime.now(timezone.utc) - timedelta(days=5)
+    iam = _iam_with_roles(
+        [_role("active")],
+        lambda RoleName: {"Role": {"RoleLastUsed": {"LastUsedDate": recent}}},
+    )
+    findings = []
+    result = collector._scan_roles(iam, "111111111111", findings)
+    assert result["TotalIamRoles"] == 1
+    assert result["StaleIamRoles"] == 0
+    assert findings == []
+
+
+def test_scan_roles_flags_old_and_never_used_roles():
+    old = datetime.now(timezone.utc) - timedelta(days=400)
+    details = {
+        "old": {"Role": {"RoleLastUsed": {"LastUsedDate": old}}},
+        "never": {"Role": {"RoleLastUsed": {}}},
+    }
+    iam = _iam_with_roles([_role("old"), _role("never")], lambda RoleName: details[RoleName])
+    findings = []
+    result = collector._scan_roles(iam, "111111111111", findings)
+    assert result["StaleIamRoles"] == 2
+    assert any("role=never reason=never_used" in f for f in findings)
+    assert any("role=old" in f and "age_days=" in f for f in findings)
+
+
+def test_scan_roles_does_not_guess_stale_when_get_role_fails():
+    from botocore.exceptions import ClientError
+
+    def boom(RoleName):
+        raise ClientError({"Error": {"Code": "Throttling", "Message": "slow down"}}, "GetRole")
+
+    iam = _iam_with_roles([_role("unknown")], boom)
+    findings = []
+    result = collector._scan_roles(iam, "111111111111", findings)
+    assert result["TotalIamRoles"] == 1
+    assert result["StaleIamRoles"] == 0
+    assert findings == []
