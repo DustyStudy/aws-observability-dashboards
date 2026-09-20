@@ -279,3 +279,42 @@ def test_scan_s3_buckets_flags_bucket_public_via_acl_grant(mock_client):
     region_counts = collector.scan_s3_buckets(findings)
 
     assert region_counts == {"eu-west-1": 1}
+
+
+@patch("network_exposure_collector.boto3.client")
+def test_scan_s3_buckets_flags_bucket_public_via_authenticated_users_grant(mock_client):
+    # AuthenticatedUsers = any AWS account, so it is effectively public.
+    s3 = MagicMock()
+    s3.list_buckets.return_value = {"Buckets": [{"Name": "authed-users-bucket"}]}
+    s3.get_bucket_location.return_value = {"LocationConstraint": "us-west-2"}
+    s3.get_bucket_policy_status.return_value = {"PolicyStatus": {"IsPublic": False}}
+    s3.get_bucket_acl.return_value = {
+        "Grants": [
+            {"Grantee": {"URI": "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"}}
+        ]
+    }
+    mock_client.return_value = s3
+
+    findings = []
+    region_counts = collector.scan_s3_buckets(findings)
+
+    assert region_counts == {"us-west-2": 1}
+    assert findings == ["PUBLIC_S3 bucket=authed-users-bucket region=us-west-2"]
+
+
+@patch("network_exposure_collector.boto3.client")
+def test_scan_s3_buckets_log_delivery_group_grant_is_not_public(mock_client):
+    s3 = MagicMock()
+    s3.list_buckets.return_value = {"Buckets": [{"Name": "log-bucket"}]}
+    s3.get_bucket_location.return_value = {"LocationConstraint": "us-west-2"}
+    s3.get_bucket_policy_status.return_value = {"PolicyStatus": {"IsPublic": False}}
+    s3.get_bucket_acl.return_value = {
+        "Grants": [
+            {"Grantee": {"URI": "http://acs.amazonaws.com/groups/s3/LogDelivery"}}
+        ]
+    }
+    mock_client.return_value = s3
+
+    findings = []
+    assert collector.scan_s3_buckets(findings) == {}
+    assert findings == []

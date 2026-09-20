@@ -26,8 +26,14 @@ resource "aws_oam_sink_policy" "this" {
         Action    = ["oam:CreateLink", "oam:UpdateLink"]
         Resource  = "*"
         Condition = {
+          # aws:PrincipalOrgID is single-valued, so it must use a plain
+          # StringEquals. Under ForAllValues an ABSENT key evaluates to true,
+          # which would let any account that is not in an organization at all
+          # link to this sink.
+          StringEquals = {
+            "aws:PrincipalOrgID" = var.organization_id
+          }
           "ForAllValues:StringEquals" = {
-            "aws:PrincipalOrgID" = [var.organization_id]
             "oam:ResourceTypes" = [
               "AWS::CloudWatch::Metric",
               "AWS::Logs::LogGroup",
