@@ -1,0 +1,18 @@
+{
+  "note": "Second real bug, found while deploying eks-security-dashboard (independent of the NO_PERMISSIONS bug). Same underlying account-quota issue already found and fixed once in the sibling aws-remediation-orchestrator repo this session.",
+  "account_lambda_concurrency_limit": 10,
+  "error": "Error: setting Lambda Function (eks-security-dashboard-patch-check) concurrency: operation error Lambda: PutFunctionConcurrency, ... InvalidParameterValueException: Specified ReservedConcurrentExecutions for function decreases account's UnreservedConcurrentExecution below its minimum value of [10].",
+  "root_cause": "Every Lambda-collector dashboard in this repo hardcodes reserved_concurrent_executions = 1 (Terraform) / ReservedConcurrentExecutions: 1 (CloudFormation). Reserving even 1 unit of concurrency fails outright in an account whose total Lambda concurrency limit equals AWS's required minimum unreserved amount (10) - true of any freshly created AWS account, not just this test account.",
+  "scope_found_via_grep": {
+    "terraform_main": ["ai-service-inventory-dashboard", "bedrock-usage-cost-dashboard", "eks-security-dashboard", "fedramp-20x-audit-dashboard", "network-exposure-dashboard", "nhi-governance-dashboard"],
+    "terraform_collector": "same 6, in each dashboard's collector/main.tf",
+    "cloudformation_template": "same 6, in each dashboard's template.yaml",
+    "cloudformation_collector": "same 6, in each dashboard's collector.yaml",
+    "total_instances_fixed": 24
+  },
+  "fix": {
+    "terraform": "Added enable_lambda_reserved_concurrency (bool, default true) to each dashboard's variables.tf (and collector/variables.tf); reserved_concurrent_executions = var.enable_lambda_reserved_concurrency ? 1 : null",
+    "cloudformation": "Added EnableLambdaReservedConcurrency parameter (String, \"true\"/\"false\", default \"true\") and a ReserveLambdaConcurrency condition; ReservedConcurrentExecutions: !If [ReserveLambdaConcurrency, 1, !Ref \"AWS::NoValue\"]"
+  },
+  "verified": "eks-security-dashboard redeployed with enable_lambda_reserved_concurrency=false: apply succeeded, the patch_check Lambda was invoked directly and returned StatusCode 200 with a well-formed response, and all 6 of its CloudWatch metrics were confirmed published. The other 5 dashboards received the identical fix but were not independently redeployed to confirm - see docs/PROOF.md section 3."
+}

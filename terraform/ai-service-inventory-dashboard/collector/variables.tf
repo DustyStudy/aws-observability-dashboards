@@ -34,3 +34,19 @@ variable "inventory_schedule" {
   type        = string
   default     = "rate(1 day)"
 }
+
+variable "enable_lambda_reserved_concurrency" {
+  type        = bool
+  description = <<-EOT
+    Whether to set reserved_concurrent_executions on this dashboard's
+    Lambda function. A newly created AWS account can start with an
+    account-wide Lambda concurrency limit as low as 10, in which case
+    reserving even 1 unit of concurrency leaves less than the minimum
+    unreserved amount AWS requires, and the apply fails with "decreases
+    account's UnreservedConcurrentExecution below its minimum value". Set
+    to false to deploy unreserved (relying on the account's shared pool)
+    until a quota increase is granted, or in a throwaway test account
+    where per-function isolation doesn't matter. See docs/PROOF.md.
+  EOT
+  default     = true
+}

@@ -324,7 +324,7 @@ resource "aws_lambda_function" "audit_collector" {
   filename         = data.archive_file.audit_collector.output_path
   source_code_hash = data.archive_file.audit_collector.output_base64sha256
 
-  reserved_concurrent_executions = 1
+  reserved_concurrent_executions = var.enable_lambda_reserved_concurrency ? 1 : null
   kms_key_arn                    = aws_kms_key.audit.arn
 
   dead_letter_config {

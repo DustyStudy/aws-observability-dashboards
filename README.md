@@ -213,14 +213,16 @@ Both run in CI on every push/PR (the `lambda-tests` job).
 
 ## Proof
 
-`security-posture-dashboard` was deployed for real and found to be
-completely non-functional: its EventBridge -> CloudWatch Logs resource
-policy didn't actually authorize the call CloudWatch Logs makes, so neither
-it nor `eks-security-dashboard` (the only other dashboard using that
-pattern) had ever received data, in either IaC flavor. Fixed in all 8
-places it appears, then confirmed the other six dashboards don't use this
-pattern at all - they were never at risk from this specific bug, though
-their own collectors remain unverified. See [`docs/PROOF.md`](docs/PROOF.md).
+Two dashboards deployed for real, two real bugs found:
+`security-posture-dashboard` and `eks-security-dashboard`'s shared
+EventBridge -> CloudWatch Logs resource policy never actually authorized
+the call CloudWatch Logs makes, so neither had ever received data, in
+either IaC flavor; and `eks-security-dashboard`'s Lambda hit a separate,
+hardcoded-concurrency bug shared by all five other Lambda-collector
+dashboards. Both fixed everywhere they appeared. The other six dashboards
+were confirmed not to share bug #1, and got bug #2's fix applied, but were
+not independently deployed. See [`docs/PROOF.md`](docs/PROOF.md) for the
+exact test status of each dashboard.
 
 ## License
 

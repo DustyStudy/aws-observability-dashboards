@@ -36,6 +36,23 @@ Parameters:
     Default: rate(1 day)
     Description: EventBridge schedule expression for the inventory-collector Lambda.
 
+
+  EnableLambdaReservedConcurrency:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Whether to set ReservedConcurrentExecutions on this dashboard's
+      Lambda function. A newly created AWS account can start with an
+      account-wide Lambda concurrency limit as low as 10, in which case
+      reserving even 1 unit of concurrency leaves less than the minimum
+      unreserved amount AWS requires, and the deployment fails. Set to
+      "false" to deploy unreserved until a quota increase is granted.
+      See docs/PROOF.md.
+
+Conditions:
+  ReserveLambdaConcurrency: !Equals [!Ref EnableLambdaReservedConcurrency, "true"]
+
 Resources:
   # ---------------------------------------------------------------------
   # KMS key used to encrypt the inventory-collector's log group, env vars,
@@ -191,7 +208,7 @@ Resources:
       Role: !GetAtt InventoryCollectorRole.Arn
       Timeout: 300
       MemorySize: 256
-      ReservedConcurrentExecutions: 1
+      ReservedConcurrentExecutions: !If [ReserveLambdaConcurrency, 1, !Ref "AWS::NoValue"]
       KmsKeyArn: !GetAtt InventoryKmsKey.Arn
       DeadLetterConfig:
         TargetArn: !GetAtt InventoryCollectorDlq.Arn
