@@ -66,17 +66,29 @@ specific "Extending" notes.
 
 ## How each dashboard is wired
 
-Pattern used across all dashboards in this repo:
+Two patterns are used across this repo, not one - see
+[`docs/PROOF.md`](docs/PROOF.md) for how that was confirmed.
+
+**Event-driven** (`security-posture-dashboard`, `eks-security-dashboard`):
 
 1. **EventBridge rule(s)** capture relevant events (Security Hub findings, GuardDuty
-   findings, Bedrock invocation logs, etc.)
+   findings)
 2. Events land in a dedicated **CloudWatch Logs group**
 3. **Metric filters** promote key fields (severity, finding type) into CloudWatch
    metrics for number/graph widgets
 4. A **CloudWatch Dashboard** combines Logs Insights query widgets and metric
    widgets into one view
 
-This means every dashboard here is really three building blocks
+**Scheduled collector** (`bedrock-usage-cost`, `ai-service-inventory`,
+`network-exposure`, `nhi-governance`, `fedramp-20x-audit`): an EventBridge
+scheduled rule invokes a Lambda collector on a timer, which calls AWS APIs
+directly and publishes the results as CloudWatch metrics for the dashboard
+to read - no EventBridge event routing or Logs group involved.
+
+`agentic-ai-guardrails-dashboard` uses neither - it reads Bedrock's own
+native CloudWatch metrics directly.
+
+For the event-driven pattern, every dashboard using it is really three building blocks
 (EventBridge → Logs → Dashboard) that you can extend or recombine for your own
 custom dashboards.
 
@@ -202,11 +214,13 @@ Both run in CI on every push/PR (the `lambda-tests` job).
 ## Proof
 
 `security-posture-dashboard` was deployed for real and found to be
-completely non-functional: the EventBridge -> CloudWatch Logs resource
-policy this repo's dashboards share as a pattern doesn't actually authorize
-the call CloudWatch Logs makes, so no dashboard using it has ever received
-data, in either IaC flavor. Fixed in all 8 places it appears. See
-[`docs/PROOF.md`](docs/PROOF.md).
+completely non-functional: its EventBridge -> CloudWatch Logs resource
+policy didn't actually authorize the call CloudWatch Logs makes, so neither
+it nor `eks-security-dashboard` (the only other dashboard using that
+pattern) had ever received data, in either IaC flavor. Fixed in all 8
+places it appears, then confirmed the other six dashboards don't use this
+pattern at all - they were never at risk from this specific bug, though
+their own collectors remain unverified. See [`docs/PROOF.md`](docs/PROOF.md).
 
 ## License
 

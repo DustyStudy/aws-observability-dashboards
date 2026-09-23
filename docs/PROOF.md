@@ -49,15 +49,26 @@ authorize the actual call CloudWatch Logs makes.
 This means **every dashboard in this repo that uses the EventBridge ->
 CloudWatch Logs pattern has never actually received data**, in either IaC
 flavor, in either the single-account or org-wide-collector variant - not
-just the one this proof happened to deploy. The other six dashboards
-(Bedrock, agentic AI, network exposure, NHI, AI service inventory,
-FedRAMP 20x audit) were not checked for the same pattern in this pass; see
-section 3.
+just the one this proof happened to deploy.
+
+**Audited (not deployed) the other six dashboards for the same pattern
+afterward:** none of them use it. `agentic-ai-guardrails-dashboard` has no
+EventBridge routing at all - it reads native Bedrock/Guardrails CloudWatch
+metrics directly. The remaining five (`bedrock-usage-cost`,
+`ai-service-inventory`, `network-exposure`, `nhi-governance`,
+`fedramp-20x-audit`) route through a scheduled EventBridge rule invoking a
+Lambda collector, authorized via `aws_lambda_permission` - a different,
+correct mechanism unaffected by this bug. Confirmed by grep across every
+`main.tf` and `template.yaml` in the repo: zero `AWS::Logs::ResourcePolicy`
+/ `aws_cloudwatch_log_resource_policy` resources outside the two already
+fixed here. This rules out the *specific* bug found in section 2 for the
+other six; it says nothing about whether their own Lambda collectors are
+otherwise correct - see section 3.
 
 ## 3. What this does not prove
 
 - **The GuardDuty-native half of this dashboard (and eks-security-dashboard's GuardDuty widget).** GuardDuty's `create-sample-findings` findings never trigger the native `aws.guardduty`/`GuardDuty Finding` EventBridge event - confirmed on an isolated probe - and `events put-events` refuses to let you spoof `Source: aws.guardduty` (`NotAuthorizedForSourceException`). See [`guardduty-native-event-limitation.json`](proof/guardduty-native-event-limitation.json). Only genuine (non-sample) GuardDuty findings would exercise this path.
-- **The other six dashboards** (`bedrock-usage-cost`, `agentic-ai-guardrails`, `ai-service-inventory`, `network-exposure`, `nhi-governance`, `fedramp-20x-audit`) were not deployed or checked for the same resource-policy pattern in this pass. Given how systemic bug #1 was, they're worth auditing before assuming they work.
+- **The other six dashboards' own correctness.** Ruled out for the specific resource-policy bug in section 2 (they don't use the pattern at all - see above), but their Lambda collectors, IAM permissions, and metric/query logic were not deployed or exercised here.
 - **The org-wide, multi-account collector path** (`org-observability/`, OAM sink/link, StackSets). The collector module's own resource policy was fixed alongside the single-account one (same bug), but the org-dashboard's cross-account aggregation was not deployed or exercised here.
 - **The CloudFormation templates**, fixed with the identical change, were not actually deployed in this pass - only the Terraform module was applied and verified against real AWS behavior. The CFN templates' fix rests on the CFN and Terraform versions being genuinely identical in this respect, as the repo's README claims.
 - **Multi-region.** Tested in `us-east-1` only.
