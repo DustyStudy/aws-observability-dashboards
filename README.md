@@ -213,16 +213,17 @@ Both run in CI on every push/PR (the `lambda-tests` job).
 
 ## Proof
 
-Two dashboards deployed for real, two real bugs found:
-`security-posture-dashboard` and `eks-security-dashboard`'s shared
-EventBridge -> CloudWatch Logs resource policy never actually authorized
-the call CloudWatch Logs makes, so neither had ever received data, in
-either IaC flavor; and `eks-security-dashboard`'s Lambda hit a separate,
-hardcoded-concurrency bug shared by all five other Lambda-collector
-dashboards. Both fixed everywhere they appeared. The other six dashboards
-were confirmed not to share bug #1, and got bug #2's fix applied, but were
-not independently deployed. See [`docs/PROOF.md`](docs/PROOF.md) for the
-exact test status of each dashboard.
+Every dashboard with custom Lambda/EventBridge logic has been deployed for
+real and had its collector invoked directly against real AWS APIs - not
+just planned or left to its daily schedule. Two real bugs turned up along
+the way (an EventBridge -> CloudWatch Logs resource policy that never
+actually authorized delivery, and a hardcoded Lambda concurrency setting
+that fails in any low-quota account), both fixed everywhere they appeared
+and reverified against real AWS behavior after the fix. The one dashboard
+never deployed (`agentic-ai-guardrails-dashboard`) has no custom code to
+test - it reads Bedrock's native metrics directly. See
+[`docs/PROOF.md`](docs/PROOF.md) for the exact test status and evidence
+for each dashboard.
 
 ## License
 

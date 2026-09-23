@@ -1,0 +1,16 @@
+{
+  "note": "fedramp-20x-audit-dashboard deployed and invoked for real, with network-exposure-dashboard, nhi-governance-dashboard, and security-posture-dashboard already live (per its own documented prerequisite) so its cross-dashboard widgets had real namespaces to read. Account ID masked.",
+  "false_alarm_worth_recording": "The first invoke attempt appeared to fail (aws lambda invoke returned a client-side 'Read timeout' error). This was the AWS CLI's own --cli-read-timeout (set to 60s for this call), not a Lambda failure: CloudWatch Logs for that same invocation showed a clean START/END/REPORT cycle, Duration 107200.77 ms, no exception. A second invoke with a longer CLI read timeout (180s) returned normally. Recorded here because it's exactly the kind of false negative worth being explicit about, having spent real time chasing it before checking the Lambda's own logs.",
+  "successful_invoke_result": {"StatusCode": 200, "body": {"metrics_published": 35, "findings": 161}},
+  "cloudwatch_metrics_confirmed": 35,
+  "per_region_behavior_confirmed_accurate": {
+    "us_east_1_only_region_with_security_hub_enabled": "Correctly produced SECURITY_HUB_CONTROL_FAILED findings (checking real control compliance) instead of SECURITY_HUB_NOT_ENABLED - including picking up real leftover findings from this session's earlier security-posture-dashboard proof testing (synthetic test findings that hadn't been archived) plus one genuine native control finding (security-control/S3.9).",
+    "other_16_regions": "Correctly produced SECURITY_HUB_NOT_ENABLED and GUARDDUTY_NOT_ENABLED findings, since those services were only ever enabled in us-east-1 for this test - not a bug, an accurate multi-region finding.",
+    "gracefully_handled_unavailable_services": [
+      "Trusted Advisor: SubscriptionRequiredException (Business/Enterprise support required) - caught and logged, did not crash the scan",
+      "IAM password policy: NoSuchEntity (no custom policy set) - caught and logged as a finding, did not crash",
+      "S3 account-level Block Public Access: NoSuchPublicAccessBlockConfiguration - caught and logged as a finding, did not crash"
+    ]
+  },
+  "cleanup_note": "Attempted to archive/resolve the leftover synthetic Security Hub findings this surfaced (via both a BatchImportFindings RecordState=ARCHIVED resubmission and a BatchUpdateFindings Workflow.Status=RESOLVED call). Neither took effect before this test's account state was torn down (GuardDuty/Security Hub disabled again) - a minor, unresolved side effect of this test's own cleanup, unrelated to the dashboard's correctness, left as a known loose end rather than spending further time on it."
+}

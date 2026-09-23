@@ -1,0 +1,31 @@
+{
+  "note": "The 5 remaining Lambda-collector dashboards (plus security-posture-dashboard, redeployed to support fedramp-20x-audit's cross-dashboard widgets), deployed for real and each Lambda invoked directly rather than waiting for its daily schedule. Account ID masked.",
+  "network_exposure_dashboard": {
+    "invoke_result": {"StatusCode": 200, "body": {"regions_scanned": 17, "metrics_published": 85, "findings": 0}},
+    "cloudwatch_metrics_confirmed": 85,
+    "note": "0 findings is accurate - no internet-open security groups or public resources exist in this test account."
+  },
+  "nhi_governance_dashboard": {
+    "invoke_result": {"StatusCode": 200, "body": {"metrics_published": 26, "findings": 6, "regions_scanned_for_secrets": 17}},
+    "cloudwatch_metrics_confirmed": 26,
+    "real_findings_from_logs": [
+      "STALE_ROLE role=ai-service-inventory-collector-role reason=never_used",
+      "STALE_ROLE role=bedrock-observability-cost-collector-role reason=never_used",
+      "STALE_ROLE role=network-exposure-collector-role reason=never_used",
+      "STALE_ROLE role=nhi-governance-collector-role reason=never_used",
+      "EXTERNAL_TRUST_ROLE role=it-admin",
+      "EXTERNAL_TRUST_ROLE role=stacksets-exec-89ef698a3ead05038ac2ebdfde431c99"
+    ],
+    "note": "All 6 findings are real and accurate, not false positives. The 4 STALE_ROLE findings are the Lambda execution roles this same test just created (correctly flagged as never-used, since they are new); the 2 EXTERNAL_TRUST_ROLE findings are genuine pre-existing IAM roles in this account with cross-account trust relationships (an IT-admin role and an AWS-managed StackSets execution role) - exactly the kind of real governance signal this dashboard exists to surface."
+  },
+  "bedrock_usage_cost_dashboard": {
+    "invoke_result": {"StatusCode": 200, "body": {"published_metrics": 1, "total_cost_usd": 0.0}},
+    "cloudwatch_metrics_confirmed": 1,
+    "note": "$0.00 is accurate - no Bedrock usage in this account."
+  },
+  "ai_service_inventory_dashboard": {
+    "invoke_result": {"StatusCode": 200, "body": {"regions_checked": 17, "metrics_published": 102}},
+    "cloudwatch_metrics_confirmed": 102
+  },
+  "security_posture_dashboard_redeploy": "Redeployed cleanly with the already-fixed resource policy (no drift, no new issues) to give fedramp-20x-audit-dashboard's cross-dashboard widgets a live SecurityObservability namespace to read from."
+}
