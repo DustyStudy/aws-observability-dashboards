@@ -84,6 +84,10 @@ resource "aws_cloudwatch_log_group" "guardduty_eks" {
 
 resource "aws_cloudwatch_log_resource_policy" "guardduty_eks" {
   policy_name = "${var.dashboard_name}-guardduty-eks-policy"
+  # Trailing ":*" required - CloudWatch Logs authorizes this action against
+  # the log stream, not the group, so a bare log-group ARN never matches
+  # and delivery fails with EventBridge's generic "NO_PERMISSIONS". See
+  # docs/PROOF.md.
   policy_document = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -91,7 +95,7 @@ resource "aws_cloudwatch_log_resource_policy" "guardduty_eks" {
       Effect    = "Allow"
       Principal = { Service = "events.amazonaws.com" }
       Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
-      Resource  = aws_cloudwatch_log_group.guardduty_eks.arn
+      Resource  = "${aws_cloudwatch_log_group.guardduty_eks.arn}:*"
       Condition = {
         ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.guardduty_eks.arn }
       }
@@ -129,6 +133,8 @@ resource "aws_cloudwatch_log_group" "inspector_eks" {
 
 resource "aws_cloudwatch_log_resource_policy" "inspector_eks" {
   policy_name = "${var.dashboard_name}-inspector-policy"
+  # Trailing ":*" required - see the guardduty_eks policy above and
+  # docs/PROOF.md.
   policy_document = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -136,7 +142,7 @@ resource "aws_cloudwatch_log_resource_policy" "inspector_eks" {
       Effect    = "Allow"
       Principal = { Service = "events.amazonaws.com" }
       Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
-      Resource  = aws_cloudwatch_log_group.inspector_eks.arn
+      Resource  = "${aws_cloudwatch_log_group.inspector_eks.arn}:*"
       Condition = {
         ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.inspector_eks.arn }
       }

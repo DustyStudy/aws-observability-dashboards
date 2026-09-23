@@ -199,6 +199,15 @@ Both run in CI on every push/PR (the `lambda-tests` job).
   (OAM-linked metrics, Metrics Insights queries, and log widgets) needs a
   real org to confirm.
 
+## Proof
+
+`security-posture-dashboard` was deployed for real and found to be
+completely non-functional: the EventBridge -> CloudWatch Logs resource
+policy this repo's dashboards share as a pattern doesn't actually authorize
+the call CloudWatch Logs makes, so no dashboard using it has ever received
+data, in either IaC flavor. Fixed in all 8 places it appears. See
+[`docs/PROOF.md`](docs/PROOF.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE)
