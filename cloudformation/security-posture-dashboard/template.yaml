@@ -95,12 +95,16 @@ Resources:
       KmsKeyId: !GetAtt LogsKmsKey.Arn
 
   # Resource policy allowing EventBridge to write into both log groups.
-  # The trailing ":*" on each Resource ARN is required, not decorative:
   # CloudWatch Logs authorizes PutLogEvents/CreateLogStream against the log
-  # *stream* (which doesn't exist yet on first delivery), so a bare
-  # log-group ARN never matches and every delivery fails with EventBridge's
-  # generic ERROR_CODE "NO_PERMISSIONS" - with nothing in the console
-  # pointing at the policy as the cause. See docs/PROOF.md.
+  # *stream* (which doesn't exist yet on first delivery), not the group, so
+  # a bare log-group ARN never matches - the same bug that broke this
+  # module's Terraform version (see docs/PROOF.md). It doesn't break this
+  # CFN version because Fn::GetAtt on AWS::Logs::LogGroup's Arn attribute
+  # already returns the ARN with a trailing ":*" (confirmed directly by
+  # deploying a throwaway log group and reading the Output back - it is
+  # not documented as clearly as it should be). Do not append another ":*"
+  # here: it doesn't break anything (the resulting ":*:*" still matches),
+  # but it's meaningless and was mistakenly added once - see docs/PROOF.md.
   EventBridgeToLogsPolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
@@ -114,7 +118,7 @@ Resources:
               "Effect": "Allow",
               "Principal": { "Service": "events.amazonaws.com" },
               "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-              "Resource": "${SecurityHubLogGroup.Arn}:*",
+              "Resource": "${SecurityHubLogGroup.Arn}",
               "Condition": {
                 "ArnEquals": { "aws:SourceArn": "${SecurityHubFindingsRule.Arn}" }
               }
@@ -124,7 +128,7 @@ Resources:
               "Effect": "Allow",
               "Principal": { "Service": "events.amazonaws.com" },
               "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-              "Resource": "${GuardDutyLogGroup.Arn}:*",
+              "Resource": "${GuardDutyLogGroup.Arn}",
               "Condition": {
                 "ArnEquals": { "aws:SourceArn": "${GuardDutyFindingsRule.Arn}" }
               }

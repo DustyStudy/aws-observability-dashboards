@@ -129,11 +129,12 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
       KmsKeyId: !GetAtt EksSecurityKmsKey.Arn
 
-  # Trailing ":*" on the Resource ARN is required, not decorative:
-  # CloudWatch Logs authorizes this action against the log stream, which
-  # doesn't exist yet on first delivery, so a bare log-group ARN never
-  # matches and delivery fails with EventBridge's generic "NO_PERMISSIONS".
-  # See docs/PROOF.md.
+  # CloudWatch Logs authorizes this action against the log stream, not the
+  # group - the same bug that broke this module's Terraform version (see
+  # docs/PROOF.md). It doesn't break this CFN version because Fn::GetAtt on
+  # AWS::Logs::LogGroup's Arn attribute already returns the ARN with a
+  # trailing ":*". Do not append another ":*" here - it was mistakenly
+  # added once (harmless, but meaningless: see docs/PROOF.md).
   GuardDutyEksLogGroupPolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
@@ -146,7 +147,7 @@ Resources:
             "Effect": "Allow",
             "Principal": { "Service": "events.amazonaws.com" },
             "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-            "Resource": "${GuardDutyEksLogGroup.Arn}:*",
+            "Resource": "${GuardDutyEksLogGroup.Arn}",
             "Condition": {
               "ArnEquals": { "aws:SourceArn": "${GuardDutyEksRule.Arn}" }
             }
@@ -184,8 +185,7 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
       KmsKeyId: !GetAtt EksSecurityKmsKey.Arn
 
-  # Trailing ":*" required - see GuardDutyEksLogGroupPolicy above and
-  # docs/PROOF.md.
+  # See GuardDutyEksLogGroupPolicy's comment above and docs/PROOF.md.
   InspectorEksLogGroupPolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
@@ -198,7 +198,7 @@ Resources:
             "Effect": "Allow",
             "Principal": { "Service": "events.amazonaws.com" },
             "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-            "Resource": "${InspectorEksLogGroup.Arn}:*",
+            "Resource": "${InspectorEksLogGroup.Arn}",
             "Condition": {
               "ArnEquals": { "aws:SourceArn": "${InspectorEksRule.Arn}" }
             }

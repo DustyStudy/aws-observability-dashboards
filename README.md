@@ -214,16 +214,20 @@ Both run in CI on every push/PR (the `lambda-tests` job).
 ## Proof
 
 Every dashboard with custom Lambda/EventBridge logic has been deployed for
-real and had its collector invoked directly against real AWS APIs - not
-just planned or left to its daily schedule. Two real bugs turned up along
-the way (an EventBridge -> CloudWatch Logs resource policy that never
-actually authorized delivery, and a hardcoded Lambda concurrency setting
-that fails in any low-quota account), both fixed everywhere they appeared
-and reverified against real AWS behavior after the fix. The one dashboard
-never deployed (`agentic-ai-guardrails-dashboard`) has no custom code to
-test - it reads Bedrock's native metrics directly. See
-[`docs/PROOF.md`](docs/PROOF.md) for the exact test status and evidence
-for each dashboard.
+real (via Terraform, and once via CloudFormation) and had its collector
+invoked directly against real AWS APIs - not just planned or left to its
+daily schedule. Two real bugs turned up along the way (an EventBridge ->
+CloudWatch Logs resource policy that never actually authorized delivery,
+and a hardcoded Lambda concurrency setting that fails in any low-quota
+account), both fixed everywhere they appeared and reverified against real
+AWS behavior after the fix. The CloudFormation smoke test then surfaced a
+real, previously undocumented divergence from Terraform (`Fn::GetAtt` on a
+log group's ARN already includes a trailing `:*` in CFN, unlike Terraform's
+equivalent attribute) that had made the earlier CFN fix harmlessly wrong;
+corrected once found. The one dashboard never deployed
+(`agentic-ai-guardrails-dashboard`) has no custom code to test - it reads
+Bedrock's native metrics directly. See [`docs/PROOF.md`](docs/PROOF.md)
+for the exact test status and evidence for each dashboard.
 
 ## License
 
