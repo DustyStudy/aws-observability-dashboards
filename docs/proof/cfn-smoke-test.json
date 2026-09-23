@@ -1,0 +1,21 @@
+{
+  "note": "CloudFormation smoke test of security-posture-dashboard/template.yaml, deployed via aws cloudformation create-stack (not Terraform). Account ID masked.",
+  "deployment": "CREATE_COMPLETE, no errors, all 13 resources created cleanly.",
+  "unexpected_discovery": {
+    "symptom": "The deployed resource policy's Resource ARNs ended in a double wildcard, e.g. '...log-group:/observability/security-posture/security-hub-findings:*:*' - not the single ':*' the Terraform fix (and this repo's own comments) documented.",
+    "root_cause": "Fn::GetAtt on AWS::Logs::LogGroup's Arn attribute already returns the ARN WITH a trailing ':*' in CloudFormation - unlike Terraform's aws_cloudwatch_log_group.arn, which does not include it. This is a real, confirmed divergence between the two IaC tools for the same underlying resource, not documented clearly by AWS.",
+    "isolated_confirmation": "Deployed a throwaway one-resource stack (a LogGroup plus an Output of Fn::GetAtt LogGroup.Arn) with no other content. The Output value came back as 'arn:aws:logs:us-east-1:<account>:log-group:/test/cfn-arn-probe:*' - confirming the trailing ':*' is present with zero other code in play.",
+    "implication": "The CFN templates most likely never had bug #1 (the NO_PERMISSIONS delivery failure) at all - the original, pre-fix CFN Resource field (bare '${LogGroup.Arn}') would already have resolved to the correctly-suffixed ARN. Appending an additional ':*' during the earlier fix (PR #26) created a redundant but harmless double wildcard.",
+    "why_it_was_harmless": "Empirically confirmed: delivery succeeded with the double wildcard in place (a real synthetic Security Hub finding reached the log group, matched the CRITICAL metric filter, and was queryable via Logs Insights) before this was noticed and corrected."
+  },
+  "correction_made": "Removed the redundant appended ':*' from all 8 places it had been added in CFN files (security-posture-dashboard and eks-security-dashboard, template.yaml + collector.yaml, 2 statements/resources each), reverting to the bare Fn::GetAtt reference. Updated each file's comment to explain the actual CFN-vs-Terraform divergence rather than the previously-inaccurate 'trailing :* is required' text (accurate for Terraform, misleading for CFN).",
+  "reverified_after_correction": {
+    "resource_policy_now_shows_single_wildcard": "arn:aws:logs:us-east-1:<account>:log-group:/observability/security-posture/security-hub-findings:* (confirmed via describe-resource-policies)",
+    "delivery_still_works": "A second synthetic finding was submitted after the correction; the log group received a new stream, confirming the fix-of-the-fix didn't break anything."
+  },
+  "other_verification_on_this_deploy": {
+    "metric_filter": "SecurityHubCriticalFindings: Sum=1.0 confirmed via get-metric-statistics",
+    "logs_insights_by_severity_query": "Returned severity=CRITICAL, findings=1, matching the submitted finding exactly"
+  },
+  "teardown": "aws cloudformation delete-stack: DELETE_COMPLETE, confirmed via a subsequent describe-stacks returning ValidationError (stack does not exist)."
+}

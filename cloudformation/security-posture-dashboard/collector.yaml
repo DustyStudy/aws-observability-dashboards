@@ -95,10 +95,13 @@ Resources:
       KmsKeyId: !GetAtt LogsKmsKey.Arn
 
   # Resource policy allowing EventBridge to write into both log groups.
-  # Trailing ":*" on each Resource ARN required - CloudWatch Logs
-  # authorizes this action against the log stream, not the group, so a
-  # bare log-group ARN never matches and delivery fails with EventBridge's
-  # generic "NO_PERMISSIONS". See docs/PROOF.md.
+  # CloudWatch Logs authorizes this action against the log stream, not the
+  # group - the same bug that broke this module's Terraform version (see
+  # docs/PROOF.md). It doesn't break this CFN version because Fn::GetAtt on
+  # AWS::Logs::LogGroup's Arn attribute already returns the ARN with a
+  # trailing ":*" (confirmed by deploying a throwaway log group and reading
+  # the Output back). Do not append another ":*" here - it was mistakenly
+  # added once (harmless, but meaningless: see docs/PROOF.md).
   EventBridgeToLogsPolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
@@ -112,7 +115,7 @@ Resources:
               "Effect": "Allow",
               "Principal": { "Service": "events.amazonaws.com" },
               "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-              "Resource": "${SecurityHubLogGroup.Arn}:*",
+              "Resource": "${SecurityHubLogGroup.Arn}",
               "Condition": {
                 "ArnEquals": { "aws:SourceArn": "${SecurityHubFindingsRule.Arn}" }
               }
@@ -122,7 +125,7 @@ Resources:
               "Effect": "Allow",
               "Principal": { "Service": "events.amazonaws.com" },
               "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-              "Resource": "${GuardDutyLogGroup.Arn}:*",
+              "Resource": "${GuardDutyLogGroup.Arn}",
               "Condition": {
                 "ArnEquals": { "aws:SourceArn": "${GuardDutyFindingsRule.Arn}" }
               }
