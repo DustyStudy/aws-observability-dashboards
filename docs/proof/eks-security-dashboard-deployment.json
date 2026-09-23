@@ -1,0 +1,25 @@
+{
+  "note": "eks-security-dashboard (Terraform, single-account module) deployed for real, separately from security-posture-dashboard. Account ID masked.",
+  "resource_policies_as_deployed": {
+    "guardduty_eks": "arn:aws:logs:us-east-1:<account>:log-group:/aws/events/eks-security-dashboard/guardduty-eks:* -- confirmed via aws logs describe-resource-policies, trailing ':*' present",
+    "inspector_eks": "arn:aws:logs:us-east-1:<account>:log-group:/aws/events/eks-security-dashboard/inspector-images:* -- confirmed via aws logs describe-resource-policies, trailing ':*' present"
+  },
+  "why_not_exercised_end_to_end": {
+    "guardduty_eks_rule": "Same limitation as security-posture-dashboard's GuardDuty widget: create-sample-findings never triggers the native aws.guardduty/GuardDuty Finding event (confirmed generally, not EKS-specific, on an isolated probe in the security-posture-dashboard proof).",
+    "inspector_eks_rule": "aws events put-events with Source=aws.inspector2 was refused: NotAuthorizedForSourceException: Not authorized for the source - confirming EventBridge's source-spoofing block applies broadly to AWS-service-reserved sources, not just aws.guardduty. There is no Inspector equivalent of create-sample-findings, and generating a real finding would need an actual vulnerable container image pushed to ECR."
+  },
+  "confirmed_instead": "The resource-policy fix's general mechanism (appending ':*' resolves NO_PERMISSIONS) was already proven conclusively and generically in security-posture-dashboard's proof, on a fully isolated rule/log-group/policy triplet unrelated to any specific dashboard. This deployment confirms the identical fix was applied correctly here too (both statements verified via the AWS API, not just source review) and that the module deploys and tears down cleanly - not that a live GuardDuty EKS or Inspector v2 finding was actually delivered.",
+  "patch_check_lambda": {
+    "manual_invoke": {"StatusCode": 200, "response_body": {"clustersScanned": 0, "clusterVersionDriftCount": 0, "publicOnlyEndpointClusters": 0, "nodegroupsNeedingUpdate": 0, "nodegroupHealthIssues": 0, "staleAmiNodegroups": 0}},
+    "note": "0 for every metric is correct and expected - there are no real EKS clusters in this test account. The invocation succeeding at all, and every metric field being present, confirms the Lambda's own logic and permissions work, independent of having real EKS data to report on."
+  },
+  "cloudwatch_metrics_confirmed_published": [
+    "EKS/Security: ClustersScanned",
+    "EKS/Security: ClusterVersionDriftCount",
+    "EKS/Security: NodegroupsNeedingUpdate",
+    "EKS/Security: NodegroupHealthIssues",
+    "EKS/Security: StaleAmiNodegroups",
+    "EKS/Security: PublicOnlyEndpointClusters"
+  ],
+  "teardown": "terraform destroy: 21 destroyed, 0 remaining. CloudWatch custom metric data points are not resource-managed and cannot be explicitly deleted via API; they age out on CloudWatch's own retention schedule - this is normal AWS behavior, not a leftover resource."
+}

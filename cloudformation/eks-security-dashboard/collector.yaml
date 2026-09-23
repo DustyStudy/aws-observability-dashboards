@@ -40,6 +40,23 @@ Parameters:
     AllowedValues:
       [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
 
+
+  EnableLambdaReservedConcurrency:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Whether to set ReservedConcurrentExecutions on this dashboard's
+      Lambda function. A newly created AWS account can start with an
+      account-wide Lambda concurrency limit as low as 10, in which case
+      reserving even 1 unit of concurrency leaves less than the minimum
+      unreserved amount AWS requires, and the deployment fails. Set to
+      "false" to deploy unreserved until a quota increase is granted.
+      See docs/PROOF.md.
+
+Conditions:
+  ReserveLambdaConcurrency: !Equals [!Ref EnableLambdaReservedConcurrency, "true"]
+
 Resources:
   # ---------------------------------------------------------------------
   # KMS key used to encrypt every log group, the Lambda's env vars, and the DLQ
@@ -302,7 +319,7 @@ Resources:
       Timeout: 120
       MemorySize: 256
       Role: !GetAtt PatchCheckRole.Arn
-      ReservedConcurrentExecutions: 1
+      ReservedConcurrentExecutions: !If [ReserveLambdaConcurrency, 1, !Ref "AWS::NoValue"]
       KmsKeyArn: !GetAtt EksSecurityKmsKey.Arn
       DeadLetterConfig:
         TargetArn: !GetAtt PatchCheckDlq.Arn
