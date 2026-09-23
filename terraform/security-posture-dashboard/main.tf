@@ -76,6 +76,13 @@ resource "aws_cloudwatch_log_group" "guardduty" {
 resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
   policy_name = "${var.name_prefix}-eventbridge-to-logs"
 
+  # The trailing ":*" on each Resource ARN is required, not decorative:
+  # CloudWatch Logs authorizes PutLogEvents/CreateLogStream against the log
+  # *stream* (which doesn't exist yet on first delivery), so a bare log-group
+  # ARN doesn't match and every delivery fails with EventBridge's generic
+  # ERROR_CODE "NO_PERMISSIONS" - with no indication in the console that the
+  # policy is the cause. Confirmed by reproducing on a clean, unrelated log
+  # group/rule/policy triplet outside this module; see docs/PROOF.md.
   policy_document = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -84,7 +91,7 @@ resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
         Effect    = "Allow"
         Principal = { Service = "events.amazonaws.com" }
         Action    = ["logs:PutLogEvents", "logs:CreateLogStream"]
-        Resource  = aws_cloudwatch_log_group.security_hub.arn
+        Resource  = "${aws_cloudwatch_log_group.security_hub.arn}:*"
         Condition = {
           ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.security_hub_findings.arn }
         }
@@ -94,7 +101,7 @@ resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
         Effect    = "Allow"
         Principal = { Service = "events.amazonaws.com" }
         Action    = ["logs:PutLogEvents", "logs:CreateLogStream"]
-        Resource  = aws_cloudwatch_log_group.guardduty.arn
+        Resource  = "${aws_cloudwatch_log_group.guardduty.arn}:*"
         Condition = {
           ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.guardduty_findings.arn }
         }

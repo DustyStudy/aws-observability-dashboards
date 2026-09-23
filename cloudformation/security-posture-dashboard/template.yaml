@@ -94,7 +94,13 @@ Resources:
       RetentionInDays: !Ref LogRetentionInDays
       KmsKeyId: !GetAtt LogsKmsKey.Arn
 
-  # Resource policy allowing EventBridge to write into both log groups
+  # Resource policy allowing EventBridge to write into both log groups.
+  # The trailing ":*" on each Resource ARN is required, not decorative:
+  # CloudWatch Logs authorizes PutLogEvents/CreateLogStream against the log
+  # *stream* (which doesn't exist yet on first delivery), so a bare
+  # log-group ARN never matches and every delivery fails with EventBridge's
+  # generic ERROR_CODE "NO_PERMISSIONS" - with nothing in the console
+  # pointing at the policy as the cause. See docs/PROOF.md.
   EventBridgeToLogsPolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
@@ -108,7 +114,7 @@ Resources:
               "Effect": "Allow",
               "Principal": { "Service": "events.amazonaws.com" },
               "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-              "Resource": "${SecurityHubLogGroup.Arn}",
+              "Resource": "${SecurityHubLogGroup.Arn}:*",
               "Condition": {
                 "ArnEquals": { "aws:SourceArn": "${SecurityHubFindingsRule.Arn}" }
               }
@@ -118,7 +124,7 @@ Resources:
               "Effect": "Allow",
               "Principal": { "Service": "events.amazonaws.com" },
               "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-              "Resource": "${GuardDutyLogGroup.Arn}",
+              "Resource": "${GuardDutyLogGroup.Arn}:*",
               "Condition": {
                 "ArnEquals": { "aws:SourceArn": "${GuardDutyFindingsRule.Arn}" }
               }

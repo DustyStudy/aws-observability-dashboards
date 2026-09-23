@@ -112,6 +112,11 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
       KmsKeyId: !GetAtt EksSecurityKmsKey.Arn
 
+  # Trailing ":*" on the Resource ARN is required, not decorative:
+  # CloudWatch Logs authorizes this action against the log stream, which
+  # doesn't exist yet on first delivery, so a bare log-group ARN never
+  # matches and delivery fails with EventBridge's generic "NO_PERMISSIONS".
+  # See docs/PROOF.md.
   GuardDutyEksLogGroupPolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
@@ -124,7 +129,7 @@ Resources:
             "Effect": "Allow",
             "Principal": { "Service": "events.amazonaws.com" },
             "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-            "Resource": "${GuardDutyEksLogGroup.Arn}",
+            "Resource": "${GuardDutyEksLogGroup.Arn}:*",
             "Condition": {
               "ArnEquals": { "aws:SourceArn": "${GuardDutyEksRule.Arn}" }
             }
@@ -162,6 +167,8 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
       KmsKeyId: !GetAtt EksSecurityKmsKey.Arn
 
+  # Trailing ":*" required - see GuardDutyEksLogGroupPolicy above and
+  # docs/PROOF.md.
   InspectorEksLogGroupPolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
@@ -174,7 +181,7 @@ Resources:
             "Effect": "Allow",
             "Principal": { "Service": "events.amazonaws.com" },
             "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-            "Resource": "${InspectorEksLogGroup.Arn}",
+            "Resource": "${InspectorEksLogGroup.Arn}:*",
             "Condition": {
               "ArnEquals": { "aws:SourceArn": "${InspectorEksRule.Arn}" }
             }

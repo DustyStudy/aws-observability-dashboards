@@ -72,7 +72,11 @@ resource "aws_cloudwatch_log_group" "guardduty" {
   kms_key_id        = aws_kms_key.logs.arn
 }
 
-# Resource policy allowing EventBridge to write into both log groups
+# Resource policy allowing EventBridge to write into both log groups.
+# Trailing ":*" on each Resource ARN required - CloudWatch Logs authorizes
+# this action against the log stream, not the group, so a bare log-group
+# ARN never matches and delivery fails with EventBridge's generic
+# "NO_PERMISSIONS". See docs/PROOF.md.
 resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
   policy_name = "${var.name_prefix}-eventbridge-to-logs"
 
@@ -84,7 +88,7 @@ resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
         Effect    = "Allow"
         Principal = { Service = "events.amazonaws.com" }
         Action    = ["logs:PutLogEvents", "logs:CreateLogStream"]
-        Resource  = aws_cloudwatch_log_group.security_hub.arn
+        Resource  = "${aws_cloudwatch_log_group.security_hub.arn}:*"
         Condition = {
           ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.security_hub_findings.arn }
         }
@@ -94,7 +98,7 @@ resource "aws_cloudwatch_log_resource_policy" "eventbridge_to_logs" {
         Effect    = "Allow"
         Principal = { Service = "events.amazonaws.com" }
         Action    = ["logs:PutLogEvents", "logs:CreateLogStream"]
-        Resource  = aws_cloudwatch_log_group.guardduty.arn
+        Resource  = "${aws_cloudwatch_log_group.guardduty.arn}:*"
         Condition = {
           ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.guardduty_findings.arn }
         }

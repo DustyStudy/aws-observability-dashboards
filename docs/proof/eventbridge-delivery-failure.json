@@ -1,0 +1,23 @@
+{
+  "note": "Captured via a temporary SQS dead-letter queue attached to the failing EventBridge target - EventBridge does not otherwise surface a delivery failure reason. Account ID masked.",
+  "symptom": "aws cloudwatch get-metric-statistics --namespace AWS/Events --metric-name FailedInvocations --dimensions Name=RuleName,Value=security-posture-security-hub-findings returned Sum=1 for every real invocation; CloudWatch Logs describe-log-streams on the target log group always returned 0 streams.",
+  "dlq_message_attributes": {
+    "ERROR_CODE": "NO_PERMISSIONS",
+    "ERROR_MESSAGE": "Could not complete putLogEvents call for /observability/security-posture/security-hub-findings.",
+    "RULE_ARN": "arn:aws:events:us-east-1:<account>:rule/security-posture-security-hub-findings",
+    "TARGET_ARN": "arn:aws:logs:us-east-1:<account>:log-group:/observability/security-posture/security-hub-findings"
+  },
+  "ruled_out": [
+    "KMS: reproduced with the log group's KMS key disassociated entirely - same failure",
+    "Resource-policy propagation delay: reproduced on a brand-new, isolated log group/rule/policy triplet, retried after a 3-minute wait - same failure",
+    "Service control policies: no custom SCP attached to this account or its OU (only AWS-managed FullAWSAccess)"
+  ],
+  "root_cause": "The resource policy's Resource field was the bare log group ARN (arn:...:log-group:/path/to/group). CloudWatch Logs authorizes PutLogEvents/CreateLogStream against the log *stream* resource, which doesn't exist until the first successful delivery - so a bare log-group ARN never matches, and every delivery fails, silently, forever, on every dashboard that copies this pattern.",
+  "fix": "Append ':*' to the Resource ARN (arn:...:log-group:/path/to/group:*). Verified: after the fix, an isolated triplet with the identical policy shape immediately received the next event (0 -> 1 log streams).",
+  "confirmed_working_after_fix": {
+    "log_delivery": "1 log stream, event content matches the finding submitted via BatchImportFindings",
+    "metric_filter": "SecurityHubCriticalFindings metric: 1 real CloudWatch datapoint, Sum=1.0, from a Severity.Label=CRITICAL synthetic finding",
+    "logs_insights_top_failing_controls_query": [{"control": "proof-final-check", "failures": "1"}],
+    "logs_insights_by_severity_query": [{"severity": "CRITICAL", "findings": "1"}]
+  }
+}
